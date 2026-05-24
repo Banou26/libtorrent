@@ -261,8 +261,17 @@ addToLibrary({
         socket: sock, udpRecv: [],
       }
       sock.on('message', (data, rinfo) => {
+        // CRITICAL: copy the buffer. @fkn/lib's WebTransport datagram reader
+        // re-uses backing buffers across reads — if we stash the original
+        // Uint8Array reference, by the time C++ drains it on the next tick
+        // the bytes have been overwritten by a later datagram. That
+        // corruption manifests as hash-piece-failed alerts and instant
+        // peer bans; tens of MB of bandwidth wasted per second.
+        const src = data instanceof Uint8Array ? data : new Uint8Array(data.buffer || data)
+        const copy = new Uint8Array(src.length)
+        copy.set(src)
         st.udpRecv.push({
-          data: data instanceof Uint8Array ? data : new Uint8Array(data.buffer || data),
+          data: copy,
           address: rinfo.address, port: rinfo.port, family: rinfo.family,
         })
         FKN.scheduleTick()
@@ -320,8 +329,13 @@ addToLibrary({
     })
     sock.on('data', (chunk) => {
       st.diag.dataChunks++
-      st.recv.chunks.push(chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk))
-      st.recv.total += chunk.length
+      // Copy the chunk — @fkn/lib's TCP stream may re-use backing buffers
+      // across reads (same bug as the UDP path causing hash-piece-failed).
+      const src = chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk)
+      const copy = new Uint8Array(src.length)
+      copy.set(src)
+      st.recv.chunks.push(copy)
+      st.recv.total += copy.length
       FKN.scheduleTick()
     })
     sock.on('end', () => { st.recv.fin = true; FKN.scheduleTick() })
@@ -405,8 +419,11 @@ addToLibrary({
     } catch (e) {}
     const newFd = FKN.newFd(newSt)
     sock.on('data', (chunk) => {
-      newSt.recv.chunks.push(chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk))
-      newSt.recv.total += chunk.length
+      const src = chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk)
+      const copy = new Uint8Array(src.length)
+      copy.set(src)
+      newSt.recv.chunks.push(copy)
+      newSt.recv.total += copy.length
       FKN.scheduleTick()
     })
     sock.on('end', () => { newSt.recv.fin = true; FKN.scheduleTick() })
@@ -483,11 +500,22 @@ addToLibrary({
       if (st && st.diag) st.diag.sendCalls++
     }
     const st = FKN.fds.get(fd)
-    if (!st) return -FKN.err.BADF
-    if (st.kind !== 'tcp' || !st.socket) return -FKN.err.NOTCONN
+    if (!st) {
+      FKN.stats._sendBadFd = (FKN.stats._sendBadFd || 0) + 1
+      return -FKN.err.BADF
+    }
+    if (st.kind !== 'tcp' || !st.socket) {
+      FKN.stats._sendNotConn = (FKN.stats._sendNotConn || 0) + 1
+      return -FKN.err.NOTCONN
+    }
     const chunk = HEAPU8.slice(bufPtr, bufPtr + len)
-    st.socket.write(chunk)
+    const ok = st.socket.write(chunk)
+    if (!ok) FKN.stats._writeBackpressure = (FKN.stats._writeBackpressure || 0) + 1
     FKN.stats.tcpTx += len
+    if (st.diag) {
+      st.diag.tcpTxBytes = (st.diag.tcpTxBytes || 0) + len
+      st.diag.firstSendLen = st.diag.firstSendLen ?? len
+    }
     return len
   },
 
