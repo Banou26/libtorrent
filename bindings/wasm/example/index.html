@@ -1,0 +1,41 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>libtorrent-wasm demo</title>
+    <style>
+      body { font: 14px/1.4 system-ui, sans-serif; padding: 16px; max-width: 720px; }
+      input[type=text] { width: 100%; padding: 6px; font: inherit; }
+      button { padding: 6px 14px; font: inherit; }
+      .row { display: flex; gap: 8px; margin: 8px 0; }
+      pre { background: #111; color: #eee; padding: 10px; border-radius: 6px;
+            max-height: 320px; overflow: auto; }
+      .stat { font-variant-numeric: tabular-nums; }
+    </style>
+  </head>
+  <body>
+    <h1>libtorrent-wasm</h1>
+    <p>A minimal browser harness driving libtorrent in a Web Worker, with
+       TCP/UDP routed through @fkn/lib's WebVPN polyfills and disk backed by
+       OPFS.</p>
+
+    <div class="row">
+      <input id="magnet" type="text" placeholder="magnet:?xt=urn:btih:…" />
+      <button id="add">Add</button>
+    </div>
+
+    <div class="stat">
+      <strong>State:</strong> <span id="state">—</span><br />
+      <strong>Progress:</strong> <span id="progress">0%</span><br />
+      <strong>Down:</strong> <span id="down">0 KB/s</span>
+      <strong>Up:</strong> <span id="up">0 KB/s</span><br />
+      <strong>Peers:</strong> <span id="peers">0</span> /
+      <strong>Seeds:</strong> <span id="seeds">0</span>
+    </div>
+
+    <h2>Alerts</h2>
+    <pre id="alerts"></pre>
+
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>

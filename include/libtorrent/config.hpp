@@ -54,7 +54,7 @@ POSSIBILITY OF SUCH DAMAGE.
 
 #include "libtorrent/aux_/disable_warnings_pop.hpp"
 
-#ifdef __linux__
+#if defined __linux__ && !defined __EMSCRIPTEN__
 #include <linux/version.h> // for LINUX_VERSION_CODE and KERNEL_VERSION
 #endif // __linux
 
@@ -114,6 +114,27 @@ POSSIBILITY OF SUCH DAMAGE.
 // (disables some float-dependent APIs)
 #define TORRENT_NO_FPU 1
 #define TORRENT_USE_I2P 0
+
+// ==== EMSCRIPTEN === (must precede Linux: __linux__ is sometimes also set)
+#elif defined __EMSCRIPTEN__
+#define TORRENT_LINUX
+#define TORRENT_USE_IFADDRS 0
+#define TORRENT_USE_NETLINK 0
+#define TORRENT_USE_IFCONF 0
+#define TORRENT_HAS_SALEN 0
+#define TORRENT_USE_FDATASYNC 0
+#define TORRENT_HAVE_MMAP 0
+#define TORRENT_HAS_FALLOCATE 0
+#define TORRENT_HAS_FADVISE 0
+#define TORRENT_USE_RLIMIT 0
+// Emscripten emulates /dev/urandom on top of crypto.getRandomValues, so
+// dev_random is the right entropy source for the WASM build.
+#define TORRENT_USE_DEV_RANDOM 1
+#define TORRENT_HAS_PTHREAD_SET_NAME 0
+#define TORRENT_HAS_COPY_FILE_RANGE 0
+#define TORRENT_USE_GETRANDOM 0
+#define TORRENT_USE_MADVISE 0
+#define TORRENT_HAS_SYMLINK 0
 
 // ==== Darwin/BSD ===
 #elif (defined __APPLE__ && defined __MACH__) || defined __FreeBSD__ || defined __NetBSD__ \

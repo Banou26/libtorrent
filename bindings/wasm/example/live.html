@@ -1,0 +1,45 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>libtorrent-wasm — live (real @fkn/lib)</title>
+    <style>
+      body { font: 13px/1.5 ui-monospace, monospace; padding: 16px; background: #111; color: #eee; max-width: 900px; }
+      input[type=text] { width: 100%; padding: 6px; font: inherit; background: #222; color: #eee; border: 1px solid #444; }
+      button { padding: 6px 14px; font: inherit; background: #2a4; color: #fff; border: 0; cursor: pointer; }
+      .row { display: flex; gap: 8px; margin: 8px 0; }
+      .stat { font-variant-numeric: tabular-nums; line-height: 1.8; }
+      pre { background: #0a0a0a; padding: 10px; border-radius: 6px;
+            max-height: 360px; overflow: auto; white-space: pre-wrap;
+            border: 1px solid #222; }
+      .ok { color: #6f6 } .bad { color: #f66 } .info { color: #6cf }
+    </style>
+  </head>
+  <body>
+    <h2>libtorrent-wasm — live</h2>
+    <p>Runs in the main thread with real @webvpn/net + @webvpn/dgram talking
+       to the FKN iframe at <code>http://localhost:1234/api</code>. Watch the
+       Network tab — packets actually go to the WebVPN server.</p>
+
+    <div class="row">
+      <input id="magnet" type="text"
+             value="magnet:?xt=urn:btih:dd8255ecdc7ca55fb0bbf81323d87062db1f6d1c&dn=Big+Buck+Bunny&tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337&tr=udp%3A%2F%2Ftracker.openbittorrent.com%3A6969" />
+      <button id="add">Add magnet</button>
+    </div>
+
+    <div class="stat" id="stat"></div>
+
+    <h3>Alerts</h3>
+    <pre id="alerts"></pre>
+
+    <script>
+      // Node-stdlib shims expected by @fkn/lib transitive deps (buffer,
+      // stream, events). vite-plugin-node-stdlib-browser's inject plugin
+      // is a rollup plugin and Vite 8 uses Rolldown — define the globals
+      // up front so the polyfills can attach.
+      window.global = window;
+      window.process = { env: { NODE_DEBUG: '' }, version: '', nextTick: (fn) => queueMicrotask(fn) };
+    </script>
+    <script type="module" src="./live.ts"></script>
+  </body>
+</html>

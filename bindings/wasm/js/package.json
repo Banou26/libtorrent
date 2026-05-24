@@ -1,0 +1,16 @@
+{
+  "name": "libtorrent-wasm",
+  "version": "0.0.1",
+  "type": "module",
+  "main": "./index.ts",
+  "exports": {
+    ".": "./index.ts",
+    "./opfs": "./opfs.ts",
+    "./types": "./types.ts",
+    "./wasm": "../build/libtorrent.js"
+  },
+  "peerDependencies": {
+    "@webvpn/net": ">=0.3.0",
+    "@webvpn/dgram": ">=0.3.0"
+  }
+}

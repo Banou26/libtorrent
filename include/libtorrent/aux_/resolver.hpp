@@ -62,6 +62,14 @@ struct TORRENT_EXTRA_EXPORT resolver final : resolver_interface
 
 	void set_cache_timeout(seconds timeout) override;
 
+#ifdef __EMSCRIPTEN__
+	// Drives the JS-side DNS path's completion. Public so the C trampoline
+	// (in resolver.cpp) can call it via the static g_active_resolver
+	// pointer. Caller posts this onto the io_context.
+	void wasm_complete(std::string host, std::string ip_csv);
+	io_context* ios_ptr() { return &m_ios; }
+#endif
+
 private:
 
 	void on_lookup(error_code const& ec, tcp::resolver::results_type ips

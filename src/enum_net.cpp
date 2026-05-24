@@ -959,6 +959,12 @@ int _System __libsocket_sysctl(int* mib, u_int namelen, void *oldp, size_t *oldl
 				, iface.interface_address.is_v4() ? AF_INET : AF_INET6);
 			ret.push_back(iface);
 		}
+#elif defined __EMSCRIPTEN__
+		// Browser environments have no enumerable interfaces — the only
+		// "network" is the WebVPN tunnel held entirely on the JS side.
+		// Returning empty lets session_impl proceed; bind paths fall back
+		// to "any" semantics which the JS shim handles.
+		(void)ec;
 #else
 
 #error "Don't know how to enumerate network interfaces on this platform"
@@ -1485,6 +1491,11 @@ int _System __libsocket_sysctl(int* mib, u_int namelen, void *oldp, size_t *oldl
 		}
 #elif defined TORRENT_ANDROID && __ANDROID_API__ >= 24
 		ec = boost::asio::error::operation_not_supported;
+#elif defined __EMSCRIPTEN__
+		// Browser environment: no routes to enumerate. Returning success
+		// with an empty list (instead of an error) lets session_impl
+		// proceed past reopen_listen_sockets without bailing out.
+		(void)ec;
 #else
 #error "don't know how to enumerate network routes on this platform"
 #endif

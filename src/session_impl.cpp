@@ -2133,6 +2133,13 @@ namespace {
 			// https://www.bittorrent.org/beps/bep_0032.html
 			// https://www.bittorrent.org/beps/bep_0045.html
 			if (!routes.empty()) expand_unspecified_address(ifs, routes, eps);
+#elif defined __EMSCRIPTEN__
+			// Browser: enum_net_interfaces/enum_routes both return empty (no
+			// kernel to ask), so expand_unspecified_address would erase any
+			// 0.0.0.0/:: entry and re-add nothing. Skip the expansion and
+			// keep the unspecified entries — the JS-side bind() shim takes
+			// "0.0.0.0" verbatim.
+			if (!ifs.empty()) expand_unspecified_address(ifs, routes, eps);
 #else
 			expand_unspecified_address(ifs, routes, eps);
 #endif

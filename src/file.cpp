@@ -102,7 +102,7 @@ POSSIBILITY OF SUCH DAMAGE.
 
 #include <boost/asio/error.hpp> // for boost::asio::error::eof
 
-#ifdef TORRENT_LINUX
+#if defined TORRENT_LINUX && !defined __EMSCRIPTEN__
 // linux specifics
 
 #include <linux/fs.h>
@@ -493,7 +493,7 @@ file_handle::file_handle(string_view name, std::int64_t const size
 
 	if (mode & open_mode::truncate)
 	{
-#ifdef TORRENT_LINUX
+#if defined TORRENT_LINUX && !defined __EMSCRIPTEN__
 		// This flag can only be set on a 0-size file. It's important to make
 		// this call before ftruncate() below.
 		if (mode & open_mode::no_cow)

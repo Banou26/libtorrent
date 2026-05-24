@@ -1,0 +1,25 @@
+{
+  "name": "libtorrent-wasm-example",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build"
+  },
+  "dependencies": {
+    "@webvpn/net": "^0.3.7",
+    "@webvpn/dgram": "^0.3.7",
+    "@fkn/lib": "file:../../../../fkn/web/lib",
+    "osra": "^0.4.2",
+    "ip-address": "^10.1.0"
+  },
+  "overrides": {
+    "@fkn/lib": "file:../../../../fkn/web/lib"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0",
+    "vite": "^8.0.0",
+    "node-stdlib-browser": "^1.2.0",
+    "@rollup/plugin-inject": "^5.0.5"
+  }
+}

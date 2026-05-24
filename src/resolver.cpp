@@ -35,6 +35,19 @@ POSSIBILITY OF SUCH DAMAGE.
 #include "libtorrent/debug.hpp"
 #include "libtorrent/aux_/time.hpp"
 
+#ifdef __EMSCRIPTEN__
+#include <emscripten/emscripten.h>
+
+// Kick off an async DNS lookup on the JS side. Routes through
+// Module.fkn.dnsLookup (which is @fkn/lib's WebVPN-tunneled DoH) when the
+// host provides it, else falls back to a plain fetch to Cloudflare. The
+// result arrives back via lt_dns_complete(hostname, ip_csv) on a later
+// tick — same callback shape resolver::on_lookup uses for the Asio path.
+extern "C" {
+  void js_resolver_async(char const* host, int want_v6);
+}
+#endif
+
 namespace libtorrent {
 namespace aux {
 
@@ -42,13 +55,24 @@ namespace aux {
 	constexpr resolver_flags resolver_interface::cache_only;
 	constexpr resolver_flags resolver_interface::abort_on_shutdown;
 
+#ifdef __EMSCRIPTEN__
+	// Singleton pointer to the active resolver. session_impl owns exactly
+	// one, and the JS-side DNS path needs a way to call back into it
+	// without threading the resolver through every js_dns_complete call.
+	static resolver* g_active_resolver = nullptr;
+#endif
+
 	resolver::resolver(io_context& ios)
 		: m_ios(ios)
 		, m_resolver(ios)
 		, m_critical_resolver(ios)
 		, m_max_size(700)
 		, m_timeout(seconds(1200))
-	{}
+	{
+#ifdef __EMSCRIPTEN__
+		g_active_resolver = this;
+#endif
+	}
 
 namespace {
 	void callback(resolver_interface::callback_t h
@@ -186,6 +210,15 @@ namespace {
 		// called once it completes. We're done here.
 		if (done) return;
 
+#ifdef __EMSCRIPTEN__
+		// On Emscripten Boost.Asio's resolver tries to spawn a worker thread
+		// (pthread_create fails under -sUSE_PTHREADS=0 → "thread: Not
+		// supported" → session pauses). Hand the lookup off to JS instead;
+		// JS calls Module.fkn.dnsLookup (or a fallback fetch) and posts the
+		// result back via lt_dns_complete on a later tick. The callback in
+		// m_callbacks stays parked until then — same shape as Asio's path.
+		js_resolver_async(host.c_str(), 0);
+#else
 		// the port is ignored
 		using namespace std::placeholders;
 		ADD_OUTSTANDING_ASYNC("resolver::on_lookup");
@@ -199,6 +232,7 @@ namespace {
 			m_critical_resolver.async_resolve(host, "80", std::bind(&resolver::on_lookup, this, _1, _2
 				, host));
 		}
+#endif
 	}
 
 	void resolver::abort()
@@ -213,5 +247,66 @@ namespace {
 		else
 			m_timeout = seconds(0);
 	}
+
+#ifdef __EMSCRIPTEN__
+	// Called by JS (lt_dns_complete trampoline below) when the async lookup
+	// kicked off by js_resolver_async finishes. ip_csv is either an empty
+	// string (failure) or a comma-separated list of dotted-quad / IPv6
+	// addresses. Re-uses the same cache+dispatch logic as the original
+	// on_lookup path.
+	void resolver::wasm_complete(std::string host, std::string ip_csv)
+	{
+		std::vector<address> addrs;
+		if (!ip_csv.empty()) {
+			std::size_t p = 0;
+			while (p < ip_csv.size()) {
+				auto comma = ip_csv.find(',', p);
+				auto piece = ip_csv.substr(p, comma == std::string::npos ? std::string::npos : comma - p);
+				error_code de;
+				auto a = make_address(piece, de);
+				if (!de) addrs.push_back(a);
+				if (comma == std::string::npos) break;
+				p = comma + 1;
+			}
+		}
+		// Cache the result (success or fail) so the next lookup is instant.
+		if (addrs.empty()) {
+			failed_dns_cache_entry& ce = m_failed_cache[host];
+			ce.last_seen = time_now();
+			ce.error = boost::asio::error::host_not_found;
+		} else {
+			dns_cache_entry& ce = m_cache[host];
+			ce.last_seen = time_now();
+			ce.addresses = addrs;
+		}
+		// Drain every pending callback for this hostname.
+		auto range = m_callbacks.equal_range(host);
+		for (auto it = range.first; it != range.second; ++it) {
+			if (addrs.empty()) {
+				callback(it->second, boost::asio::error::host_not_found, {});
+			} else {
+				callback(it->second, error_code{}, addrs);
+			}
+		}
+		m_callbacks.erase(range.first, range.second);
+	}
+#endif
 }
 }
+
+#ifdef __EMSCRIPTEN__
+// C ABI trampoline. JS calls this after the async lookup resolves.
+extern "C" EMSCRIPTEN_KEEPALIVE
+void lt_dns_complete(char const* hostname, char const* ip_csv)
+{
+	if (auto* r = libtorrent::aux::g_active_resolver) {
+		// Capture by value: JS will free its buffers after we return.
+		auto& ios = *reinterpret_cast<boost::asio::io_context*>(r->ios_ptr());
+		std::string h = hostname ? hostname : "";
+		std::string c = ip_csv ? ip_csv : "";
+		boost::asio::post(ios, [r, h = std::move(h), c = std::move(c)] () mutable {
+			r->wasm_complete(std::move(h), std::move(c));
+		});
+	}
+}
+#endif

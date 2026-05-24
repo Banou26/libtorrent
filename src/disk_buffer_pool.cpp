@@ -46,7 +46,7 @@ POSSIBILITY OF SUCH DAMAGE.
 #include <sys/sysctl.h>
 #endif
 
-#ifdef TORRENT_LINUX
+#if defined TORRENT_LINUX && !defined __EMSCRIPTEN__
 #include <linux/unistd.h>
 #endif
 
