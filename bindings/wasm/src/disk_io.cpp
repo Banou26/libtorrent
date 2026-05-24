@@ -182,18 +182,72 @@ struct wasm_disk_io final
       std::function<void(disk_buffer_holder, storage_error const&)> handler,
       disk_job_flags_t) override
   {
-    auto const job_id = next_job_id();
-    {
-      std::lock_guard<std::mutex> g(m_mu);
-      m_pending.emplace(job_id, read_job{std::move(handler)});
+    auto* se = storage_at(idx);
+    if (!se) {
+      post(m_ios, [handler] {
+        handler(disk_buffer_holder{}, storage_error{
+            error_code(boost::system::errc::invalid_argument, generic_category()),
+            operation_t::partfile_read});
+      });
+      return;
     }
-    // Translate piece-relative offset to (file_index, file_offset). This
-    // dance has to live somewhere; doing it here keeps the JS side dumb
-    // (it just opens files by index).
-    int file_index;
-    std::int64_t file_offset;
-    map_piece(idx, r.piece, r.start, file_index, file_offset);
-    js_disk_read(static_cast<int>(idx), job_id, file_index, file_offset, r.length);
+    auto slices = se->fs->map_block(r.piece, r.start, r.length);
+    if (slices.empty()) {
+      post(m_ios, [handler] {
+        handler(disk_buffer_holder{}, storage_error{
+            error_code(boost::system::errc::invalid_argument, generic_category()),
+            operation_t::partfile_read});
+      });
+      return;
+    }
+    if (slices.size() == 1) {
+      auto const job_id = next_job_id();
+      {
+        std::lock_guard<std::mutex> g(m_mu);
+        m_pending.emplace(job_id, read_job{std::move(handler)});
+      }
+      auto const& s = slices.front();
+      js_disk_read(static_cast<int>(idx), job_id, static_cast<int>(s.file_index),
+                   s.offset, static_cast<std::int32_t>(s.size));
+      return;
+    }
+    // Multi-slice: piece spans file boundaries. Allocate one combined
+    // buffer up front and have each sub-read drop its slice in. When
+    // every sub-read has reported, hand the buffer off to libtorrent
+    // wrapped as a disk_buffer_holder (free_disk_buffer calls std::free).
+    auto* combined = static_cast<std::uint8_t*>(std::malloc(r.length));
+    auto remaining = std::make_shared<std::atomic<int>>(static_cast<int>(slices.size()));
+    auto first_err = std::make_shared<std::atomic<int>>(0);
+    std::int64_t byte_off = 0;
+    for (auto const& s : slices) {
+      auto const sub_id = next_job_id();
+      auto const this_off = byte_off;
+      auto const this_size = static_cast<std::int32_t>(s.size);
+      auto sub_handler = [this, combined, remaining, first_err, this_off, this_size,
+                          total_len = r.length, handler]
+                         (disk_buffer_holder data, storage_error const& ec) mutable
+      {
+        if (ec && first_err->load() == 0) first_err->store(ec.ec.value());
+        if (data) std::memcpy(combined + this_off, data.data(), this_size);
+        if (remaining->fetch_sub(1, std::memory_order_acq_rel) != 1) return;
+        int err = first_err->load();
+        if (err != 0) {
+          std::free(combined);
+          handler(disk_buffer_holder{}, storage_error{
+              error_code(err, system_category()), operation_t::file_read});
+          return;
+        }
+        disk_buffer_holder holder(*this, reinterpret_cast<char*>(combined), total_len);
+        handler(std::move(holder), storage_error{});
+      };
+      {
+        std::lock_guard<std::mutex> g(m_mu);
+        m_pending.emplace(sub_id, read_job{std::move(sub_handler)});
+      }
+      js_disk_read(static_cast<int>(idx), sub_id, static_cast<int>(s.file_index),
+                   s.offset, this_size);
+      byte_off += s.size;
+    }
   }
 
   bool async_write(storage_index_t idx, peer_request const& r,
@@ -201,19 +255,66 @@ struct wasm_disk_io final
       std::function<void(storage_error const&)> handler,
       disk_job_flags_t) override
   {
-    auto const job_id = next_job_id();
-    {
-      std::lock_guard<std::mutex> g(m_mu);
-      m_pending.emplace(job_id, write_job{std::move(handler), std::move(obs)});
+    auto* se = storage_at(idx);
+    if (!se) {
+      post(m_ios, [handler] {
+        handler(storage_error{
+            error_code(boost::system::errc::invalid_argument, generic_category()),
+            operation_t::file_write});
+      });
+      return false;
     }
-    int file_index;
-    std::int64_t file_offset;
-    map_piece(idx, r.piece, r.start, file_index, file_offset);
-    js_disk_write(static_cast<int>(idx), job_id, file_index, file_offset,
-                  reinterpret_cast<std::uint8_t const*>(buf), r.length);
-    // We do not (yet) implement write backpressure here. Returning false
-    // says "queue is fine"; if JS-side queues build up the host can throttle
-    // by deferring the lt_disk_complete_write call.
+    auto slices = se->fs->map_block(r.piece, r.start, r.length);
+    if (slices.empty()) {
+      post(m_ios, [handler] {
+        handler(storage_error{
+            error_code(boost::system::errc::invalid_argument, generic_category()),
+            operation_t::file_write});
+      });
+      return false;
+    }
+    if (slices.size() == 1) {
+      auto const job_id = next_job_id();
+      {
+        std::lock_guard<std::mutex> g(m_mu);
+        m_pending.emplace(job_id, write_job{std::move(handler), std::move(obs)});
+      }
+      auto const& s = slices.front();
+      js_disk_write(static_cast<int>(idx), job_id, static_cast<int>(s.file_index),
+                    s.offset, reinterpret_cast<std::uint8_t const*>(buf),
+                    static_cast<std::int32_t>(s.size));
+      return false;
+    }
+    // Multi-slice: fan out a sub-write per file slice. Each sub-write
+    // gets its own job id; when the last one completes we fire the
+    // libtorrent handler (first error wins).
+    auto remaining = std::make_shared<std::atomic<int>>(static_cast<int>(slices.size()));
+    auto first_err = std::make_shared<std::atomic<int>>(0);
+    auto shared_obs = std::shared_ptr<disk_observer>(std::move(obs));
+    auto shared_handler = std::make_shared<std::function<void(storage_error const&)>>(std::move(handler));
+    std::int64_t byte_off = 0;
+    for (auto const& s : slices) {
+      auto const sub_id = next_job_id();
+      auto const this_off = byte_off;
+      auto sub_handler = [remaining, first_err, shared_handler]
+                         (storage_error const& ec) {
+        if (ec && first_err->load() == 0) first_err->store(ec.ec.value());
+        if (remaining->fetch_sub(1, std::memory_order_acq_rel) != 1) return;
+        int err = first_err->load();
+        (*shared_handler)(err != 0
+          ? storage_error{error_code(err, system_category()), operation_t::file_write}
+          : storage_error{});
+      };
+      {
+        std::lock_guard<std::mutex> g(m_mu);
+        m_pending.emplace(sub_id, write_job{std::move(sub_handler), shared_obs});
+      }
+      js_disk_write(static_cast<int>(idx), sub_id, static_cast<int>(s.file_index),
+                    s.offset,
+                    reinterpret_cast<std::uint8_t const*>(buf) + this_off,
+                    static_cast<std::int32_t>(s.size));
+      byte_off += s.size;
+    }
     return false;
   }
 

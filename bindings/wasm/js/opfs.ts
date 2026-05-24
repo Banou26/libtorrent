@@ -10,6 +10,12 @@ import type { StorageBackend } from './types'
 interface StorageEntry {
   rootDir: FileSystemDirectoryHandle
   files: Map<number, FileSystemSyncAccessHandle>
+  // In-flight opens: we cache the Promise so two callers racing for the
+  // same file resolve to the same handle. OPFS only allows one
+  // SyncAccessHandle per file, so two concurrent createSyncAccessHandle()
+  // calls would throw "A FileSystemSyncAccessHandle for the same file
+  // has been created in this scope" on the second one.
+  opening: Map<number, Promise<FileSystemSyncAccessHandle>>
   fileMeta: Array<{ path: string; size: number }>
 }
 
@@ -22,7 +28,7 @@ export class OPFSStorage implements StorageBackend {
     // getDirectoryHandle complains.
     const cleanPath = savePath.replace(/^\/+/, '')
     const rootDir = await ensureDirRecursive(root, cleanPath)
-    this.storages.set(id, { rootDir, files: new Map(), fileMeta: files })
+    this.storages.set(id, { rootDir, files: new Map(), opening: new Map(), fileMeta: files })
   }
 
   async onRemoveStorage(id: number) {
@@ -120,12 +126,20 @@ export class OPFSStorage implements StorageBackend {
   // Returns the cached SyncAccessHandle synchronously when it exists,
   // otherwise a Promise that resolves to one. Hot-path reads/writes pay
   // zero microtask cost once the handle has been opened the first time.
+  // Concurrent callers for the same file share one in-flight Promise so
+  // we never invoke createSyncAccessHandle() twice for the same file —
+  // the second call would throw the "same file" lock error.
   private openFile(id: number, fileIndex: number): FileSystemSyncAccessHandle | Promise<FileSystemSyncAccessHandle> {
     const e = this.storages.get(id)
     if (!e) throw new Error(`unknown storage ${id}`)
     const cached = e.files.get(fileIndex)
     if (cached) return cached
-    return this.openFileSlow(id, fileIndex)
+    const pending = e.opening.get(fileIndex)
+    if (pending) return pending
+    const p = this.openFileSlow(id, fileIndex)
+    e.opening.set(fileIndex, p)
+    p.finally(() => e.opening.delete(fileIndex))
+    return p
   }
 
   private async openFileSlow(id: number, fileIndex: number): Promise<FileSystemSyncAccessHandle> {
