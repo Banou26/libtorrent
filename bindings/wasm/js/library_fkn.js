@@ -920,27 +920,46 @@ addToLibrary({
       }
       return FKN_send(fd, iovBase, iovL, 0)
     }
-    // Multi-iovec: stitch a temporary buffer so the underlying send
-    // sees one chunk. Allocation is per-call but msglens are small.
+    // Multi-iovec: stitch into a single JS-side Uint8Array and hand it
+    // straight to the socket. Avoids any _malloc round trip (which can
+    // grow the heap and detach HEAPU8/HEAPU32 — the prior copyWithin
+    // version corrupted bytes when that happened, surfacing as random
+    // hash-piece failures on the wire).
+    const iovs = []
     for (let i = 0; i < iovLen; i++) {
-      total += HEAPU32[(iovPtr + i * 8 + 4) >> 2]
+      const base = HEAPU32[(iovPtr + i * 8 + 0) >> 2]
+      const len  = HEAPU32[(iovPtr + i * 8 + 4) >> 2]
+      iovs.push({ base, len })
+      total += len
     }
-    const combinedPtr = _malloc(total)
-    let off = 0
-    for (let i = 0; i < iovLen; i++) {
-      const iovBase = HEAPU32[(iovPtr + i * 8 + 0) >> 2]
-      const iovL    = HEAPU32[(iovPtr + i * 8 + 4) >> 2]
-      HEAPU8.copyWithin(combinedPtr + off, iovBase, iovBase + iovL)
-      off += iovL
+    const merged = new Uint8Array(total)
+    let mOff = 0
+    for (const { base, len } of iovs) {
+      merged.set(HEAPU8.subarray(base, base + len), mOff)
+      mOff += len
     }
-    let rc
     if (st.kind === 'udp') {
-      rc = FKN_sendto(fd, combinedPtr, total, 0, namePtr || 0, nameLen || 0)
-    } else {
-      rc = FKN_send(fd, combinedPtr, total, 0)
+      FKN.stats.sendto++
+      const ep = namePtr
+        ? FKN.readSockaddr(namePtr, nameLen)
+        : (st.remoteAddr
+            ? { address: st.remoteAddr, port: st.remotePort, family: st.remoteFamily }
+            : null)
+      if (!ep) return -FKN.err.INVAL
+      st.socket.send(merged, 0, total, ep.port, ep.address)
+      FKN.stats.udpTx += total
+      return total
     }
-    _free(combinedPtr)
-    return rc
+    FKN.stats.send++
+    if (st.diag) st.diag.sendCalls++
+    if (!st.socket) return -FKN.err.NOTCONN
+    st.socket.write(merged)
+    FKN.stats.tcpTx += total
+    if (st.diag) {
+      st.diag.tcpTxBytes = (st.diag.tcpTxBytes || 0) + total
+      st.diag.firstSendLen = st.diag.firstSendLen ?? total
+    }
+    return total
   },
 
   __syscall_sendto__deps: ['$FKN', '$FKN_send', '$FKN_sendto'],
