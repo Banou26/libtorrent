@@ -126,7 +126,7 @@ LT_API int lt_session_create() {
   // (which returns success even if the WebVPN can't actually accept
   // inbound), but the listen_socket_t entry is what tracker/UDP paths
   // attach themselves to.
-  sp.set_str(lt::settings_pack::listen_interfaces, "0.0.0.0:6881");
+  sp.set_str(lt::settings_pack::listen_interfaces, "0.0.0.0:6882");
   sp.set_bool(lt::settings_pack::enable_upnp, false);
   sp.set_bool(lt::settings_pack::enable_natpmp, false);
   sp.set_bool(lt::settings_pack::enable_lsd, false);
