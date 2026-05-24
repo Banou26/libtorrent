@@ -133,6 +133,19 @@ const init = async () => {
   // OPFS is available in workers; using it as our disk backend means
   // libtorrent actually persists pieces (vs the live.html null-storage path
   // that discards everything just to keep the protocol happy).
+  // Forward worker-level errors to the main thread for easier debugging.
+  const origErr = console.error.bind(console)
+  console.error = (...args: any[]) => {
+    origErr(...args)
+    try {
+      ;(self as any).postMessage({ type: 'worker-error', args: args.map(a => {
+        if (typeof a === 'object') {
+          try { return JSON.stringify(a) } catch { return String(a) }
+        }
+        return String(a)
+      }) })
+    } catch {}
+  }
   const storage = new OPFSStorage()
   const fkn = { net, dgram, storage }
   inst = await (factory as any)({ fkn })

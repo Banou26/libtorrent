@@ -52,9 +52,33 @@ export class OPFSStorage implements StorageBackend {
   write(id: number, fileIndex: number, offset: number, bytes: Uint8Array): void | Promise<void> {
     const handleOrPromise = this.openFile(id, fileIndex)
     const doWrite = (handle: FileSystemSyncAccessHandle): void => {
-      handle.write(bytes, { at: offset })
+      try {
+        const wrote = handle.write(bytes, { at: offset })
+        if (wrote < bytes.length) {
+          // eslint-disable-next-line no-console
+          console.error('[opfs] short write', { id, fileIndex, offset, want: bytes.length, wrote })
+          throw new Error('short write')
+        }
+      } catch (e) {
+        // eslint-disable-next-line no-console
+        console.error('[opfs] write failed', {
+          id, fileIndex, offset, len: bytes.length,
+          err: String(e),
+          errName: (e as any)?.name,
+          errMsg: (e as any)?.message,
+          isView: ArrayBuffer.isView(bytes),
+          bytesType: Object.prototype.toString.call(bytes),
+        })
+        throw e
+      }
     }
-    if (handleOrPromise instanceof Promise) return handleOrPromise.then(doWrite)
+    if (handleOrPromise instanceof Promise) {
+      return handleOrPromise.then(doWrite).catch((e) => {
+        // eslint-disable-next-line no-console
+        console.error('[opfs] openFile failed', { id, fileIndex, err: String(e) })
+        throw e
+      })
+    }
     return doWrite(handleOrPromise)
   }
 

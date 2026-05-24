@@ -31,6 +31,10 @@ worker.addEventListener('message', (ev: MessageEvent) => {
   const msg = ev.data
   if (msg.type === 'ready') {
     $('state').textContent = 'ready'
+  } else if (msg.type === 'worker-error') {
+    console.error('[worker]', ...(msg.args || []))
+    ;(window as any).__workerErrors = (window as any).__workerErrors || []
+    ;(window as any).__workerErrors.push(msg.args)
   } else if (msg.type === 'poll-result') {
     const s = msg.status
     if (!s.ready) return
