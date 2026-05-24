@@ -4562,7 +4562,16 @@ namespace libtorrent {
 		// timeouts should never be less than 2 seconds. The granularity is whole
 		// seconds, and only checked once per second. 2 is the minimum to avoid
 		// being considered timed out instantly
-		return std::max(2, ret);
+		//
+		// WASM/browser patch: the adaptive timeout above produces seconds
+		// counted from `m_request_time.avg_deviation() * 4`. On a fast
+		// localhost peer that's ~0–2 ms, so ret rounds down to 0 and the
+		// effective timeout becomes the 2-second floor. Under heavy load
+		// the JS tick chain can stall the C++ session for >2 s — and a
+		// single such stall snubs the fast peer (drops desired-queue-size
+		// to 1, killing throughput). 30 s is well above any realistic
+		// tick stall while still letting genuinely silent peers time out.
+		return std::max(30, ret);
 	}
 
 	void peer_connection::get_peer_info(peer_info& p) const
