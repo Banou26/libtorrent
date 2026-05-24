@@ -58,6 +58,11 @@ const status = () => {
   if (!fkn) return { ready: false }
   const fdsByKind: Record<string, number> = {}
   let tcpConnected = 0, tcpConnecting = 0, tcpWithData = 0, tcpInError = 0
+  // Aggregate per-fd diag across all TCP fds so we can see whether
+  // anything is being polled / read / written at all.
+  let tcpEverPolled = 0, tcpEverDataChunk = 0, tcpEverSendCall = 0, tcpEverRecvCall = 0
+  let connDelayMaxMs = 0, connDelayCount = 0
+  const tcpSample: any[] = []
   for (const st of fkn.fds.values()) {
     fdsByKind[st.kind] = (fdsByKind[st.kind] || 0) + 1
     if (st.kind === 'tcp') {
@@ -65,13 +70,37 @@ const status = () => {
       else if (st.connecting) tcpConnecting++
       if (st.recv?.total > 0) tcpWithData++
       if (st.error) tcpInError++
+      const d = st.diag
+      if (d) {
+        if (d.polled > 0) tcpEverPolled++
+        if (d.dataChunks > 0) tcpEverDataChunk++
+        if (d.sendCalls > 0) tcpEverSendCall++
+        if (d.recvCalls > 0) tcpEverRecvCall++
+        if (d.connectedAt && d.connectAt) {
+          const delay = d.connectedAt - d.connectAt
+          if (delay > connDelayMaxMs) connDelayMaxMs = delay
+          connDelayCount++
+        }
+        if (tcpSample.length < 5 && st.connected) {
+          tcpSample.push({
+            connDelayMs: d.connectedAt - d.connectAt,
+            polled: d.polled, polledOut: d.polledOut, polledIn: d.polledIn,
+            sendCalls: d.sendCalls, recvCalls: d.recvCalls,
+            dataChunks: d.dataChunks,
+            nonblock: d.nonblockAtConnect,
+            error: st.error,
+          })
+        }
+      }
     }
   }
   return {
     tcpDetail: { connected: tcpConnected, connecting: tcpConnecting, withData: tcpWithData, errored: tcpInError },
-    tcpSendmsg: fkn.stats._tcpSendmsgCalls || 0,
-    badSendmsg: fkn.stats._unknownSendmsg || 0,
-    tcpPolled: fkn.stats._tcpPolled || 0,
+    tcpEver: { polled: tcpEverPolled, dataChunk: tcpEverDataChunk, sendCall: tcpEverSendCall, recvCall: tcpEverRecvCall },
+    tcpConnDelay: { count: connDelayCount, maxMs: connDelayMaxMs },
+    tcpSample,
+    tcpPolledConnected: fkn.stats._tcpPolledConnected || 0,
+    tcpPolledConnecting: fkn.stats._tcpPolledConnecting || 0,
     tcpPolledOut: fkn.stats._tcpPolledOut || 0,
     tcpPolledIn: fkn.stats._tcpPolledIn || 0,
     ready: true,
