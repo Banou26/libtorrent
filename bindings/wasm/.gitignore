@@ -1,0 +1,6 @@
+build/
+example/node_modules/
+example/libtorrent.js
+example/libtorrent.wasm
+example/package-lock.json
+example/.em_cache/

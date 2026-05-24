@@ -1,0 +1,63 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>libtorrent-wasm smoke test</title>
+    <style>
+      body { font: 13px/1.4 ui-monospace, monospace; padding: 16px; background: #111; color: #eee; }
+      .ok { color: #6f6; } .bad { color: #f66; } .info { color: #6cf; }
+      pre { white-space: pre-wrap; }
+    </style>
+  </head>
+  <body>
+    <h2>libtorrent-wasm smoke test (incremental)</h2>
+    <pre id="out">loading…</pre>
+    <script type="module">
+      const out = document.getElementById('out')
+      const log = (msg, cls='') => {
+        const line = document.createElement('div')
+        if (cls) line.className = cls
+        line.textContent = msg
+        out.appendChild(line)
+        console.log(`[smoke] ${msg}`)
+      }
+      out.textContent = ''
+
+      window.addEventListener('error', e => log('window error: ' + e.message, 'bad'))
+      window.addEventListener('unhandledrejection', e => log('unhandled: ' + (e.reason?.message ?? e.reason), 'bad'))
+
+      // Marker to know the script started.
+      log('script started', 'info')
+
+      try {
+        log('step A: dynamic import…', 'info')
+        const importStart = performance.now()
+        const mod = await import('./libtorrent.js')
+        log('  imported in ' + (performance.now() - importStart).toFixed(1) + 'ms', 'ok')
+
+        const factory = mod.default
+        log('  factory type=' + typeof factory, factory ? 'ok' : 'bad')
+
+        const fkn = {
+          net: { createServer: () => ({ on(){}, listen(){}, close(){} }),
+                 connect: () => ({ on(){}, write(){}, destroy(){} }) },
+          dgram: { createSocket: () => ({ on(){}, bind(){}, send(){}, close(){},
+                                          address: () => ({address:'', port:0, family:'IPv4'}) }) },
+          storage: null,
+        }
+
+        log('step B: instantiate module…', 'info')
+        const instStart = performance.now()
+        const inst = await factory({ fkn })
+        log('  instantiated in ' + (performance.now() - instStart).toFixed(1) + 'ms', 'ok')
+
+        const exports = Object.keys(inst).filter(k => k.startsWith('_lt_'))
+        log('  ' + exports.length + ' _lt_ exports', 'ok')
+
+        log('STOP HERE — not calling lt_session_create yet', 'info')
+      } catch (e) {
+        log('FAIL: ' + (e?.stack ?? e), 'bad')
+      }
+    </script>
+  </body>
+</html>

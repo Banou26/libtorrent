@@ -1,0 +1,19 @@
+<!doctype html>
+<html>
+<body>
+<script type="module">
+console.log('TOP', performance.now())
+setTimeout(() => console.log('[TOP] sT 100 fired', performance.now()), 100)
+setTimeout(() => console.log('[TOP] sT 500 fired', performance.now()), 500)
+setTimeout(() => console.log('[TOP] sT 2000 fired', performance.now()), 2000)
+setInterval(() => console.log('[TOP] sI 1000', performance.now()), 1000)
+
+import * as net from '@webvpn/net'
+import * as dgram from '@webvpn/dgram'
+
+console.log('IMPORTED', performance.now())
+setTimeout(() => console.log('[AFTER] sT 100 fired', performance.now()), 100)
+setTimeout(() => console.log('[AFTER] sT 2000 fired', performance.now()), 2000)
+</script>
+</body>
+</html>

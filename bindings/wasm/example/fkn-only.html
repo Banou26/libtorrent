@@ -1,0 +1,16 @@
+<!doctype html>
+<html>
+<body>
+<script type="module">
+console.log('SCRIPT t+', performance.now())
+setTimeout(() => console.log('[BEFORE-IMPORT] 250ms fired at', performance.now()), 250)
+setTimeout(() => console.log('[BEFORE-IMPORT] 1000ms fired at', performance.now()), 1000)
+setInterval(() => console.log('[BEFORE-IMPORT] tick', performance.now()), 500)
+
+// Import @fkn/lib (auto-creates the iframe) and @webvpn/net+dgram
+import('@fkn/lib').then(() => console.log('@fkn/lib imported at', performance.now()))
+import('@webvpn/net').then(() => console.log('@webvpn/net imported at', performance.now()))
+import('@webvpn/dgram').then(() => console.log('@webvpn/dgram imported at', performance.now()))
+</script>
+</body>
+</html>

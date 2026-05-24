@@ -1,0 +1,12 @@
+<!doctype html>
+<html>
+<body>
+<script>
+console.log('script start at', performance.now())
+setTimeout(() => console.log('setTimeout 250ms fired at', performance.now()), 250)
+setTimeout(() => console.log('setTimeout 1000ms fired at', performance.now()), 1000)
+setInterval(() => console.log('setInterval(500) fired at', performance.now()), 500)
+console.log('script end at', performance.now())
+</script>
+</body>
+</html>
