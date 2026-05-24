@@ -38,6 +38,29 @@ addToLibrary({
   $FKN: {
     initialized: false,
 
+    // Emscripten uses WASI errno values, NOT Linux's. The differences
+    // *matter*: returning Linux EINPROGRESS (115) from connect() makes
+    // Asio see a random error instead of EINPROGRESS (26), so it never
+    // arms a POLLOUT watcher on the fd — the connect handler never
+    // fires, the BT handshake never goes out, and every TCP peer
+    // connection sits dead in the water. Same trap for EAGAIN: Linux
+    // 11 != WASI 6 (which is what error::would_block compares against).
+    //
+    // Anything we set/return as an errno from this file MUST use these.
+    err: {
+      AGAIN: 6,        // EWOULDBLOCK = EAGAIN
+      BADF: 8,
+      CONNREFUSED: 14,
+      CONNRESET: 15,
+      FAULT: 21,
+      INPROGRESS: 26,
+      INVAL: 28,
+      IO: 29,
+      NOTCONN: 53,
+      NOTSOCK: 57,
+      TIMEDOUT: 73,
+    },
+
     // Fd allocator. Asio's select_reactor on Emscripten uses select() with
     // FD_SETSIZE=1024, so fds must stay strictly below that. Start at 16 to
     // give libc room for stdio (0–2) and any sockfs entries Emscripten may
@@ -225,7 +248,11 @@ addToLibrary({
     if (SOCK_TYPE === 1) {
       // TCP, unconnected. Will become a client on connect() or a server
       // on bind+listen.
-      return FKN.newFd({ kind: 'tcp-unbound', family, nonblock: false })
+      const fd = FKN.newFd({
+        kind: 'tcp-unbound', family, nonblock: false,
+        diag: { polled: 0, polledOut: 0, polledIn: 0, dataChunks: 0, sendCalls: 0, recvCalls: 0, connectAt: 0, connectedAt: 0 }
+      })
+      return fd
     }
     if (SOCK_TYPE === 2) {
       const sock = FKN.dgram.createSocket({ type: family === 'IPv6' ? 'udp6' : 'udp4' })
@@ -241,7 +268,7 @@ addToLibrary({
         FKN.scheduleTick()
       })
       sock.on('error', (err) => {
-        st.error = err.errno || 5 /* EIO */
+        st.error = err.errno || FKN.err.IO
         FKN.scheduleTick()
       })
       sock.on('listening', () => {
@@ -250,16 +277,16 @@ addToLibrary({
       })
       return FKN.newFd(st)
     }
-    return -22 /* EINVAL */
+    return -FKN.err.INVAL
   },
 
   // ---- TCP connect (non-blocking) ----------------------------------------
   $FKN_connect__deps: ['$FKN'],
   $FKN_connect(fd, addrPtr, addrLen) {
     const st = FKN.fds.get(fd)
-    if (!st) return -9 /* EBADF */
+    if (!st) return -FKN.err.BADF
     const ep = FKN.readSockaddr(addrPtr, addrLen)
-    if (!ep) return -22 /* EINVAL */
+    if (!ep) return -FKN.err.INVAL
 
     if (st.kind === 'udp') {
       // connected UDP just sets the default remote; do it locally.
@@ -268,7 +295,7 @@ addToLibrary({
       st.remoteFamily = ep.family
       return 0
     }
-    if (st.kind !== 'tcp-unbound') return -22
+    if (st.kind !== 'tcp-unbound') return -FKN.err.INVAL
 
     const sock = FKN.net.connect({ host: ep.address, port: ep.port })
     st.kind = 'tcp'
@@ -277,10 +304,13 @@ addToLibrary({
     st.remoteAddr = ep.address
     st.remotePort = ep.port
     st.remoteFamily = ep.family
+    st.diag.connectAt = Date.now()
+    st.diag.nonblockAtConnect = st.nonblock
 
     sock.on('connect', () => {
       st.connecting = false
       st.connected = true
+      st.diag.connectedAt = Date.now()
       try {
         st.localAddr = sock.localAddress
         st.localPort = sock.localPort
@@ -289,6 +319,7 @@ addToLibrary({
       FKN.scheduleTick()
     })
     sock.on('data', (chunk) => {
+      st.diag.dataChunks++
       st.recv.chunks.push(chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk))
       st.recv.total += chunk.length
       FKN.scheduleTick()
@@ -296,12 +327,12 @@ addToLibrary({
     sock.on('end', () => { st.recv.fin = true; FKN.scheduleTick() })
     sock.on('close', () => { st.recv.fin = true; FKN.scheduleTick() })
     sock.on('error', (err) => {
-      st.error = err.errno || 104 /* ECONNRESET */
+      st.error = err.errno || FKN.err.CONNRESET
       st.recv.error = st.error
       FKN.scheduleTick()
     })
 
-    return st.nonblock ? -115 /* EINPROGRESS */ : 0
+    return st.nonblock ? -FKN.err.INPROGRESS : 0
   },
 
   // ---- TCP bind + listen + accept ----------------------------------------
@@ -309,9 +340,9 @@ addToLibrary({
   $FKN_bind(fd, addrPtr, addrLen) {
     console.log('[FKN] bind(fd=' + fd + ')')
     const st = FKN.fds.get(fd)
-    if (!st) return -9
+    if (!st) return -FKN.err.BADF
     const ep = FKN.readSockaddr(addrPtr, addrLen)
-    if (!ep) return -22
+    if (!ep) return -FKN.err.INVAL
     if (st.kind === 'udp') {
       st.socket.bind(ep.port, ep.address)
       st.localAddr = ep.address; st.localPort = ep.port; st.localFamily = ep.family
@@ -330,14 +361,14 @@ addToLibrary({
       st.localFamily = ep.family
       return 0
     }
-    return -22
+    return -FKN.err.INVAL
   },
 
   $FKN_listen__deps: ['$FKN'],
   $FKN_listen(fd /*, backlog */) {
     console.log('[FKN] listen(fd=' + fd + ')')
     const st = FKN.fds.get(fd)
-    if (!st || st.kind !== 'tcp-unbound') return -22
+    if (!st || st.kind !== 'tcp-unbound') return -FKN.err.INVAL
     const server = FKN.net.createServer()
     st.kind = 'tcp-listen'
     st.server = server
@@ -347,7 +378,7 @@ addToLibrary({
       FKN.scheduleTick()
     })
     server.on('error', (err) => {
-      st.error = err.errno || 5
+      st.error = err.errno || FKN.err.IO
       FKN.scheduleTick()
     })
     server.listen(st.pendingBindPort, st.pendingBindAddr)
@@ -357,9 +388,9 @@ addToLibrary({
   $FKN_accept__deps: ['$FKN'],
   $FKN_accept(fd, addrPtr, addrLenPtr) {
     const st = FKN.fds.get(fd)
-    if (!st || st.kind !== 'tcp-listen') return -9
+    if (!st || st.kind !== 'tcp-listen') return -FKN.err.BADF
     const sock = st.acceptQueue.shift()
-    if (!sock) return -11 /* EAGAIN */
+    if (!sock) return -FKN.err.AGAIN
     const newSt = {
       kind: 'tcp', family: st.family, nonblock: false,
       socket: sock, connected: true,
@@ -381,7 +412,7 @@ addToLibrary({
     sock.on('end', () => { newSt.recv.fin = true; FKN.scheduleTick() })
     sock.on('close', () => { newSt.recv.fin = true; FKN.scheduleTick() })
     sock.on('error', (err) => {
-      newSt.error = err.errno || 104; newSt.recv.error = newSt.error
+      newSt.error = err.errno || FKN.err.CONNRESET; newSt.recv.error = newSt.error
       FKN.scheduleTick()
     })
     if (addrPtr && newSt.remoteAddr) {
@@ -396,13 +427,17 @@ addToLibrary({
   $FKN_recv__deps: ['$FKN'],
   $FKN_recv(fd, bufPtr, len /*, flags */) {
     FKN.stats.recv++
+    {
+      const st = FKN.fds.get(fd)
+      if (st && st.diag) st.diag.recvCalls++
+    }
     const st = FKN.fds.get(fd)
-    if (!st) return -9
+    if (!st) return -FKN.err.BADF
     if (st.error) { const e = st.error; st.error = 0; return -e }
     const r = st.recv
     if (r.total === 0) {
       if (r.fin) return 0 // graceful EOF
-      return -11 /* EAGAIN */
+      return -FKN.err.AGAIN
     }
     let need = Math.min(len, r.total)
     let written = 0
@@ -426,8 +461,8 @@ addToLibrary({
   $FKN_recvfrom(fd, bufPtr, len, /*flags*/ _f, addrPtr, addrLenPtr) {
     FKN.stats.recvfrom++
     const st = FKN.fds.get(fd)
-    if (!st || st.kind !== 'udp') return -9
-    if (!st.udpRecv.length) return -11 /* EAGAIN */
+    if (!st || st.kind !== 'udp') return -FKN.err.BADF
+    if (!st.udpRecv.length) return -FKN.err.AGAIN
     const pkt = st.udpRecv.shift()
     const take = Math.min(pkt.data.length, len)
     HEAPU8.set(pkt.data.subarray(0, take), bufPtr)
@@ -443,9 +478,13 @@ addToLibrary({
   $FKN_send__deps: ['$FKN'],
   $FKN_send(fd, bufPtr, len /*, flags */) {
     FKN.stats.send++
+    {
+      const st = FKN.fds.get(fd)
+      if (st && st.diag) st.diag.sendCalls++
+    }
     const st = FKN.fds.get(fd)
-    if (!st) return -9
-    if (st.kind !== 'tcp' || !st.socket) return -107 /* ENOTCONN */
+    if (!st) return -FKN.err.BADF
+    if (st.kind !== 'tcp' || !st.socket) return -FKN.err.NOTCONN
     const chunk = HEAPU8.slice(bufPtr, bufPtr + len)
     st.socket.write(chunk)
     FKN.stats.tcpTx += len
@@ -456,13 +495,13 @@ addToLibrary({
   $FKN_sendto(fd, bufPtr, len, /*flags*/ _f, addrPtr, addrLen) {
     FKN.stats.sendto++
     const st = FKN.fds.get(fd)
-    if (!st || st.kind !== 'udp') return -9
+    if (!st || st.kind !== 'udp') return -FKN.err.BADF
     const ep = addrPtr
       ? FKN.readSockaddr(addrPtr, addrLen)
       : (st.remoteAddr
           ? { address: st.remoteAddr, port: st.remotePort, family: st.remoteFamily }
           : null)
-    if (!ep) return -22
+    if (!ep) return -FKN.err.INVAL
     const chunk = HEAPU8.slice(bufPtr, bufPtr + len)
     st.socket.send(chunk, 0, len, ep.port, ep.address)
     FKN.stats.udpTx += len
@@ -479,7 +518,7 @@ addToLibrary({
   $FKN_getsockname__deps: ['$FKN'],
   $FKN_getsockname(fd, addrPtr, addrLenPtr) {
     const st = FKN.fds.get(fd)
-    if (!st || !st.localAddr) return -9
+    if (!st || !st.localAddr) return -FKN.err.BADF
     FKN.writeSockaddr(addrPtr, addrLenPtr, {
       family: st.localFamily, address: st.localAddr, port: st.localPort,
     })
@@ -489,7 +528,7 @@ addToLibrary({
   $FKN_getpeername__deps: ['$FKN'],
   $FKN_getpeername(fd, addrPtr, addrLenPtr) {
     const st = FKN.fds.get(fd)
-    if (!st || !st.remoteAddr) return -107
+    if (!st || !st.remoteAddr) return -FKN.err.NOTCONN
     FKN.writeSockaddr(addrPtr, addrLenPtr, {
       family: st.remoteFamily, address: st.remoteAddr, port: st.remotePort,
     })
@@ -503,7 +542,7 @@ addToLibrary({
   $FKN_setsockopt__deps: ['$FKN'],
   $FKN_setsockopt(fd, level, optname, optvalPtr, optvalLen) {
     const st = FKN.fds.get(fd)
-    if (!st) return -9
+    if (!st) return -FKN.err.BADF
     if (!st.socket) return 0 // unbound TCP: silently accept
     // IPPROTO_TCP = 6; TCP_NODELAY = 1
     if (level === 6 && optname === 1 && st.socket.setNoDelay) {
@@ -523,7 +562,7 @@ addToLibrary({
   $FKN_getsockopt__deps: ['$FKN'],
   $FKN_getsockopt(fd, level, optname, optvalPtr, optvalLenPtr) {
     const st = FKN.fds.get(fd)
-    if (!st) return -9
+    if (!st) return -FKN.err.BADF
     // SO_ERROR (1, 4): used by Asio to check connect() result.
     if (level === 1 && optname === 4) {
       const err = st.error || 0
@@ -541,7 +580,7 @@ addToLibrary({
   $FKN_fcntl__deps: ['$FKN'],
   $FKN_fcntl(fd, cmd, arg) {
     const st = FKN.fds.get(fd)
-    if (!st) return -9
+    if (!st) return -FKN.err.BADF
     if (cmd === 3) return st.nonblock ? 0x800 : 0
     if (cmd === 4) { st.nonblock = !!(arg & 0x800); return 0 }
     return 0
@@ -574,12 +613,20 @@ addToLibrary({
           (st.kind === 'udp' && true)
         )) revents |= 4
         if (st.error) revents |= 8
-        // Track which TCP fds Asio is even asking about — they need to be
-        // polled for libtorrent's write side to kick in.
-        if (st.kind === 'tcp' && st.connected) {
-          FKN.stats._tcpPolled = (FKN.stats._tcpPolled || 0) + 1
+        // Track which TCP fds Asio is even asking about — connected or not.
+        // Asio adds a fd to its watch list during async_connect (POLLOUT
+        // interest); if no TCP fd ever shows up here it means Asio
+        // never armed the watcher.
+        if (st.kind === 'tcp') {
+          if (st.connected) FKN.stats._tcpPolledConnected = (FKN.stats._tcpPolledConnected || 0) + 1
+          else FKN.stats._tcpPolledConnecting = (FKN.stats._tcpPolledConnecting || 0) + 1
           if (events & 4) FKN.stats._tcpPolledOut = (FKN.stats._tcpPolledOut || 0) + 1
           if (events & 1) FKN.stats._tcpPolledIn = (FKN.stats._tcpPolledIn || 0) + 1
+          if (st.diag) {
+            st.diag.polled++
+            if (events & 4) st.diag.polledOut++
+            if (events & 1) st.diag.polledIn++
+          }
         }
       }
       HEAP16[(off + 6) >> 1] = revents
@@ -658,7 +705,7 @@ addToLibrary({
     }
     const onErr = (e) => {
       console.error('[fkn] disk read error', e)
-      Module._lt_disk_complete_read(jobLo, jobHi, 0, 0, e.errno || 5)
+      Module._lt_disk_complete_read(jobLo, jobHi, 0, 0, e.errno || FKN.err.IO)
       FKN.scheduleTick()
     }
     let result
@@ -685,7 +732,7 @@ addToLibrary({
     // Slice off a copy that lives independent of WASM heap reuse.
     const bytes = HEAPU8.slice(dataPtr, dataPtr + len)
     const onErr = (e) => {
-      Module._lt_disk_complete_write(jobLo, jobHi, e?.errno || 5)
+      Module._lt_disk_complete_write(jobLo, jobHi, e?.errno || FKN.err.IO)
       FKN.scheduleTick()
     }
     let result
@@ -718,7 +765,7 @@ addToLibrary({
     }
     Promise.resolve(FKN.storage.check(id))
       .then((st) => { Module._lt_disk_complete_status(jobLo, jobHi, st | 0, 0); FKN.scheduleTick() })
-      .catch((e) => { Module._lt_disk_complete_status(jobLo, jobHi, 0, e.errno || 5); FKN.scheduleTick() })
+      .catch((e) => { Module._lt_disk_complete_status(jobLo, jobHi, 0, e.errno || FKN.err.IO); FKN.scheduleTick() })
   },
 
   js_disk_move__deps: ['$FKN'],
@@ -730,14 +777,14 @@ addToLibrary({
       _free(ptr); FKN.scheduleTick()
     }
     if (!FKN.storage || !FKN.storage.move) { finish(0); return }
-    Promise.resolve(FKN.storage.move(id, newPath)).then(() => finish(0), (e) => finish(e.errno || 5))
+    Promise.resolve(FKN.storage.move(id, newPath)).then(() => finish(0), (e) => finish(e.errno || FKN.err.IO))
   },
 
   js_disk_delete__deps: ['$FKN'],
   js_disk_delete(id, jobLo, jobHi, flags) {
     const finish = (err) => { Module._lt_disk_complete_delete(jobLo, jobHi, err || 0); FKN.scheduleTick() }
     if (!FKN.storage || !FKN.storage.deleteFiles) { finish(0); return }
-    Promise.resolve(FKN.storage.deleteFiles(id, flags)).then(() => finish(0), (e) => finish(e.errno || 5))
+    Promise.resolve(FKN.storage.deleteFiles(id, flags)).then(() => finish(0), (e) => finish(e.errno || FKN.err.IO))
   },
 
   js_disk_rename__deps: ['$FKN'],
@@ -749,7 +796,7 @@ addToLibrary({
       _free(ptr); FKN.scheduleTick()
     }
     if (!FKN.storage || !FKN.storage.rename) { finish(0); return }
-    Promise.resolve(FKN.storage.rename(id, fileIdx, newName)).then(() => finish(0), (e) => finish(e.errno || 5))
+    Promise.resolve(FKN.storage.rename(id, fileIdx, newName)).then(() => finish(0), (e) => finish(e.errno || FKN.err.IO))
   },
 
   js_disk_stop__deps: ['$FKN'],
@@ -771,32 +818,32 @@ addToLibrary({
 
   __syscall_connect__deps: ['$FKN', '$FKN_connect'],
   __syscall_connect: function(fd, addr, addrLen) {
-    if (!FKN.fds.has(fd)) return -9 // EBADF — not one of ours
+    if (!FKN.fds.has(fd)) return -FKN.err.BADF // not one of ours
     return FKN_connect(fd, addr, addrLen)
   },
 
   __syscall_bind__deps: ['$FKN', '$FKN_bind'],
   __syscall_bind: function(fd, addr, addrLen) {
-    if (!FKN.fds.has(fd)) return -9
+    if (!FKN.fds.has(fd)) return -FKN.err.BADF
     return FKN_bind(fd, addr, addrLen)
   },
 
   __syscall_listen__deps: ['$FKN', '$FKN_listen'],
   __syscall_listen: function(fd, backlog) {
-    if (!FKN.fds.has(fd)) return -9
+    if (!FKN.fds.has(fd)) return -FKN.err.BADF
     return FKN_listen(fd, backlog)
   },
 
   __syscall_accept4__deps: ['$FKN', '$FKN_accept'],
   __syscall_accept4: function(fd, addr, addrLen, _flags) {
-    if (!FKN.fds.has(fd)) return -9
+    if (!FKN.fds.has(fd)) return -FKN.err.BADF
     return FKN_accept(fd, addr, addrLen)
   },
 
   __syscall_recvfrom__deps: ['$FKN', '$FKN_recv', '$FKN_recvfrom'],
   __syscall_recvfrom: function(fd, buf, len, flags, addr, addrLen) {
     const st = FKN.fds.get(fd)
-    if (!st) return -9
+    if (!st) return -FKN.err.BADF
     return st.kind === 'udp'
       ? FKN_recvfrom(fd, buf, len, flags, addr, addrLen)
       : FKN_recv(fd, buf, len, flags)
@@ -826,7 +873,7 @@ addToLibrary({
     if (!st) {
       if (FKN.stats._unknownSendmsg === undefined) FKN.stats._unknownSendmsg = 0
       FKN.stats._unknownSendmsg++
-      return -9
+      return -FKN.err.BADF
     }
     if (st.kind === 'tcp') FKN.stats._tcpSendmsgCalls = (FKN.stats._tcpSendmsgCalls || 0) + 1
     const namePtr   = HEAPU32[(msgPtr +  0) >> 2]
@@ -871,7 +918,7 @@ addToLibrary({
   __syscall_sendto__deps: ['$FKN', '$FKN_send', '$FKN_sendto'],
   __syscall_sendto: function(fd, buf, len, flags, addr, addrLen) {
     const st = FKN.fds.get(fd)
-    if (!st) return -9
+    if (!st) return -FKN.err.BADF
     return st.kind === 'udp'
       ? FKN_sendto(fd, buf, len, flags, addr, addrLen)
       : FKN_send(fd, buf, len, flags)
@@ -879,25 +926,25 @@ addToLibrary({
 
   __syscall_getsockname__deps: ['$FKN', '$FKN_getsockname'],
   __syscall_getsockname: function(fd, addr, addrLen) {
-    if (!FKN.fds.has(fd)) return -9
+    if (!FKN.fds.has(fd)) return -FKN.err.BADF
     return FKN_getsockname(fd, addr, addrLen)
   },
 
   __syscall_getpeername__deps: ['$FKN', '$FKN_getpeername'],
   __syscall_getpeername: function(fd, addr, addrLen) {
-    if (!FKN.fds.has(fd)) return -9
+    if (!FKN.fds.has(fd)) return -FKN.err.BADF
     return FKN_getpeername(fd, addr, addrLen)
   },
 
   __syscall_setsockopt__deps: ['$FKN', '$FKN_setsockopt'],
   __syscall_setsockopt: function(fd, level, optname, optval, optlen) {
-    if (!FKN.fds.has(fd)) return -9
+    if (!FKN.fds.has(fd)) return -FKN.err.BADF
     return FKN_setsockopt(fd, level, optname, optval, optlen)
   },
 
   __syscall_getsockopt__deps: ['$FKN', '$FKN_getsockopt'],
   __syscall_getsockopt: function(fd, level, optname, optval, optlenPtr) {
-    if (!FKN.fds.has(fd)) return -9
+    if (!FKN.fds.has(fd)) return -FKN.err.BADF
     return FKN_getsockopt(fd, level, optname, optval, optlenPtr)
   },
 
@@ -912,7 +959,7 @@ addToLibrary({
 
   __syscall_fcntl64__deps: ['$FKN', '$FKN_fcntl'],
   __syscall_fcntl64: function(fd, cmd, varargs) {
-    if (!FKN.fds.has(fd)) return -9
+    if (!FKN.fds.has(fd)) return -FKN.err.BADF
     // Emscripten passes varargs as a pointer to the arg list; for our F_GETFL
     // / F_SETFL we only ever care about a single int — read it.
     const arg = (cmd === 4 /* F_SETFL */) ? HEAP32[varargs >> 2] : 0
