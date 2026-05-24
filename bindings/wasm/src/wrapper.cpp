@@ -143,8 +143,18 @@ LT_API int lt_session_create() {
   sp.set_int(lt::settings_pack::send_buffer_watermark, 5 * 1024 * 1024);
   sp.set_int(lt::settings_pack::send_buffer_low_watermark, 512 * 1024);
   sp.set_int(lt::settings_pack::send_buffer_watermark_factor, 150);
-  sp.set_int(lt::settings_pack::max_out_request_queue, 1500);
+  // max_out_request_queue caps in-flight piece requests per peer. At
+  // 20+ MiB/s × default request_queue_time of 3s × 16 KiB blocks, the
+  // desired queue size hits ~4000 — old 1500 triggered the
+  // outstanding_request_limit_reached performance warning right before
+  // peers got "snubbed" because we couldn't keep them fed. Lift it.
+  sp.set_int(lt::settings_pack::max_out_request_queue, 5000);
   sp.set_int(lt::settings_pack::connections_limit, 500);
+  // Keep peers from being declared "snubbed" while we're processing a
+  // burst — defaults assume ~100ms response latency; our JS tick chain
+  // can stretch that under heavy load.
+  sp.set_int(lt::settings_pack::peer_timeout, 240);
+  sp.set_int(lt::settings_pack::request_timeout, 120);
   // Speed up peer selection — defaults bias for long-running clients.
   sp.set_int(lt::settings_pack::unchoke_slots_limit, 32);
   // The hot path is data movement, not bookkeeping. Disable the rate
