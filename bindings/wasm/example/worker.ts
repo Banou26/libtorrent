@@ -57,13 +57,36 @@ const status = () => {
   const fkn = inst.__FKN
   if (!fkn) return { ready: false }
   const fdsByKind: Record<string, number> = {}
-  for (const st of fkn.fds.values()) fdsByKind[st.kind] = (fdsByKind[st.kind] || 0) + 1
+  let tcpConnected = 0, tcpConnecting = 0, tcpWithData = 0, tcpInError = 0
+  for (const st of fkn.fds.values()) {
+    fdsByKind[st.kind] = (fdsByKind[st.kind] || 0) + 1
+    if (st.kind === 'tcp') {
+      if (st.connected) tcpConnected++
+      else if (st.connecting) tcpConnecting++
+      if (st.recv?.total > 0) tcpWithData++
+      if (st.error) tcpInError++
+    }
+  }
   return {
+    tcpDetail: { connected: tcpConnected, connecting: tcpConnecting, withData: tcpWithData, errored: tcpInError },
+    tcpSendmsg: fkn.stats._tcpSendmsgCalls || 0,
+    badSendmsg: fkn.stats._unknownSendmsg || 0,
+    tcpPolled: fkn.stats._tcpPolled || 0,
+    tcpPolledOut: fkn.stats._tcpPolledOut || 0,
+    tcpPolledIn: fkn.stats._tcpPolledIn || 0,
     ready: true,
     fds: fkn.fds.size,
     fdsByKind,
     ticks: Number(inst._lt_diag_tick_count()),
     handlers: Number(inst._lt_diag_total_handlers()),
+    poll: fkn.stats.poll,
+    pollReady: fkn.stats.pollReady,
+    recvfrom: fkn.stats.recvfrom,
+    sendto: fkn.stats.sendto,
+    recv: fkn.stats.recv,
+    send: fkn.stats.send,
+    diskW: fkn.stats.diskWrite,
+    diskR: fkn.stats.diskRead,
     udp: { rx: fkn.stats.udpRx, tx: fkn.stats.udpTx },
     tcp: { rx: fkn.stats.tcpRx, tx: fkn.stats.tcpTx },
     udpPkts: rxLog.length,

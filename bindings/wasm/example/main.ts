@@ -34,6 +34,7 @@ worker.addEventListener('message', (ev: MessageEvent) => {
   } else if (msg.type === 'poll-result') {
     const s = msg.status
     if (!s.ready) return
+    ;(window as any).__lastStatus = s
     const now = Date.now()
     const dt = (now - lastTs) / 1000
     const rxRate = dt > 0 ? (s.udp.rx - lastUdpRx) / dt : 0
