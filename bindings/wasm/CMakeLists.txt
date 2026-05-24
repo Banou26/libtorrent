@@ -105,6 +105,10 @@ set(EM_LINK_FLAGS
   # We never SAB; ensure no pthread enablement leaks in.
   "-sUSE_PTHREADS=0"
   "-sWASM=1"
+  # uint64_t job_id parameters are passed as (lo, hi) i32 pairs from JS.
+  # Default WASM_BIGINT=1 in newer Emscripten would pass them as a single
+  # bigint and break those calls. Force the split-i32 ABI.
+  "-sWASM_BIGINT=0"
 
   # The host wires this up before the module instantiates.
   "-sINCOMING_MODULE_JS_API=['print','printErr','wasmBinary','fkn']"

@@ -2661,7 +2661,18 @@ namespace {
 				}
 			}
 
-			if (err == error::would_block || err == error::try_again)
+			if (err == error::would_block || err == error::try_again
+#ifdef __EMSCRIPTEN__
+				// On Emscripten the underlying recvfrom syscall (provided by
+				// library_fkn.js) returns -EAGAIN (11) to mean "queue empty".
+				// Boost.Asio's enum mapping on Emscripten ends up reporting
+				// this as `operation_aborted` (msg "Operation canceled")
+				// rather than `would_block` — they share the same numeric
+				// value here because of how ASIO_OS_DEF expands. Match by
+				// raw errno so the read loop actually terminates.
+				|| err.value() == 11
+#endif
+				)
 			{
 				// there are no more packets on the socket
 				break;
