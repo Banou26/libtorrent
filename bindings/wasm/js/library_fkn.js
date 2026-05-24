@@ -260,7 +260,24 @@ addToLibrary({
         kind: 'udp', family, nonblock: false,
         socket: sock, udpRecv: [],
       }
+      // Per-second packet rate / byte rate counter on the worker side of
+      // the cross-realm hop. Diff against the iframe-side counter to see
+      // whether the iframe→worker osra path is dropping anything.
+      FKN._dbgWorkerUdpPkts = FKN._dbgWorkerUdpPkts || 0
+      FKN._dbgWorkerUdpBytes = FKN._dbgWorkerUdpBytes || 0
+      if (!FKN._dbgWorkerUdpStarted) {
+        FKN._dbgWorkerUdpStarted = true
+        setInterval(() => {
+          if (FKN._dbgWorkerUdpPkts || FKN._dbgWorkerUdpBytes) {
+            console.log('[fkn-udp-worker] pkts/s=' + FKN._dbgWorkerUdpPkts + ' KiB/s=' + Math.round(FKN._dbgWorkerUdpBytes / 1024))
+          }
+          FKN._dbgWorkerUdpPkts = 0
+          FKN._dbgWorkerUdpBytes = 0
+        }, 1000)
+      }
       sock.on('message', (data, rinfo) => {
+        FKN._dbgWorkerUdpPkts++
+        FKN._dbgWorkerUdpBytes += data.length || data.byteLength || 0
         // CRITICAL: copy the buffer. @fkn/lib's WebTransport datagram reader
         // re-uses backing buffers across reads — if we stash the original
         // Uint8Array reference, by the time C++ drains it on the next tick
