@@ -82,12 +82,20 @@ window.addEventListener('unhandledrejection', e => log('unhandled: ' + (e.reason
   // unchoke, etc.) need someone to tick the io_context to fire. 1 Hz is
   // plenty for sub-minute cadences and won't pin the CPU.
   setInterval(() => (inst as any).__FKN.scheduleTick(), 1000)
-  ;(window as any).__status = () => ({
-    fds: (inst as any).__FKN.fds.size,
-    ticks: Number(inst._lt_diag_tick_count()),
-    handlers: Number(inst._lt_diag_total_handlers()),
-    rx: rxLog.length,
-  })
+  ;(window as any).__status = () => {
+    const fkn = (inst as any).__FKN
+    const fdsByKind: Record<string, number> = {}
+    for (const st of fkn.fds.values()) fdsByKind[st.kind] = (fdsByKind[st.kind] || 0) + 1
+    return {
+      fds: fkn.fds.size,
+      fdsByKind,
+      ticks: Number(inst._lt_diag_tick_count()),
+      handlers: Number(inst._lt_diag_total_handlers()),
+      udp: { rx: fkn.stats.udpRx, tx: fkn.stats.udpTx },
+      tcp: { rx: fkn.stats.tcpRx, tx: fkn.stats.tcpTx, recv: fkn.stats.recv, send: fkn.stats.send },
+      pkts: { udpRx: rxLog.length },
+    }
+  }
   ;(window as any).__rx = () => rxLog
 
   $('add').addEventListener('click', () => log('add rc=' + (window as any).__add(), 'info'))
