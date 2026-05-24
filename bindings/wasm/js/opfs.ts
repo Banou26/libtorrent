@@ -34,22 +34,28 @@ export class OPFSStorage implements StorageBackend {
     this.storages.delete(id)
   }
 
-  async read(id: number, fileIndex: number, offset: number, len: number): Promise<Uint8Array> {
-    const handle = await this.openFile(id, fileIndex)
-    const out = new Uint8Array(len)
-    const read = handle.read(out, { at: offset })
-    if (read < len) {
-      // Underlying file is shorter than requested (sparse area not yet
-      // written). Zero-fill the rest — libtorrent treats short reads as
-      // errors otherwise.
-      out.fill(0, read)
+  // Note: return type is a union of sync and Promise — js_disk_read/write
+  // detect this and skip the microtask round-trip when the file handle is
+  // already cached, which is the steady-state hot path during streaming.
+  read(id: number, fileIndex: number, offset: number, len: number): Uint8Array | Promise<Uint8Array> {
+    const handleOrPromise = this.openFile(id, fileIndex)
+    const doRead = (handle: FileSystemSyncAccessHandle): Uint8Array => {
+      const out = new Uint8Array(len)
+      const read = handle.read(out, { at: offset })
+      if (read < len) out.fill(0, read)
+      return out
     }
-    return out
+    if (handleOrPromise instanceof Promise) return handleOrPromise.then(doRead)
+    return doRead(handleOrPromise)
   }
 
-  async write(id: number, fileIndex: number, offset: number, bytes: Uint8Array): Promise<void> {
-    const handle = await this.openFile(id, fileIndex)
-    handle.write(bytes, { at: offset })
+  write(id: number, fileIndex: number, offset: number, bytes: Uint8Array): void | Promise<void> {
+    const handleOrPromise = this.openFile(id, fileIndex)
+    const doWrite = (handle: FileSystemSyncAccessHandle): void => {
+      handle.write(bytes, { at: offset })
+    }
+    if (handleOrPromise instanceof Promise) return handleOrPromise.then(doWrite)
+    return doWrite(handleOrPromise)
   }
 
   async release(id: number): Promise<void> {
@@ -87,11 +93,19 @@ export class OPFSStorage implements StorageBackend {
     }
   }
 
-  private async openFile(id: number, fileIndex: number): Promise<FileSystemSyncAccessHandle> {
+  // Returns the cached SyncAccessHandle synchronously when it exists,
+  // otherwise a Promise that resolves to one. Hot-path reads/writes pay
+  // zero microtask cost once the handle has been opened the first time.
+  private openFile(id: number, fileIndex: number): FileSystemSyncAccessHandle | Promise<FileSystemSyncAccessHandle> {
     const e = this.storages.get(id)
     if (!e) throw new Error(`unknown storage ${id}`)
-    let h = e.files.get(fileIndex)
-    if (h) return h
+    const cached = e.files.get(fileIndex)
+    if (cached) return cached
+    return this.openFileSlow(id, fileIndex)
+  }
+
+  private async openFileSlow(id: number, fileIndex: number): Promise<FileSystemSyncAccessHandle> {
+    const e = this.storages.get(id)!
     const meta = e.fileMeta[fileIndex]
     if (!meta) throw new Error(`unknown file ${fileIndex}`)
     const segments = meta.path.split('/').filter(Boolean)
@@ -101,9 +115,9 @@ export class OPFSStorage implements StorageBackend {
       dir = await dir.getDirectoryHandle(s, { create: true })
     }
     const fileHandle = await dir.getFileHandle(name, { create: true })
-    h = await (fileHandle as any).createSyncAccessHandle()
-    e.files.set(fileIndex, h!)
-    return h!
+    const h = await (fileHandle as any).createSyncAccessHandle() as FileSystemSyncAccessHandle
+    e.files.set(fileIndex, h)
+    return h
   }
 }
 

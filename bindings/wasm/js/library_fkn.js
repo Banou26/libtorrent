@@ -48,17 +48,42 @@ addToLibrary({
     // Tick scheduler: requested from JS callbacks when something becomes
     // ready that the C side hasn't seen yet.
     pendingTick: false,
+    // Scheduler: use a MessageChannel-driven post (task priority, no 4ms
+    // setTimeout-min-delay floor) when there's active work to drain — gives
+    // ~submilliseconds-per-tick under load. Fall back to setTimeout(16)
+    // when ran===0 to give the renderer breathing room (paint, compositor).
+    //
+    // MessageChannel doesn't starve macrotasks the way self-rearming
+    // queueMicrotask does — it queues a regular task, so timers, render,
+    // and CDP eval all still get interleaved.
     scheduleTick() {
       FKN.stats.schedule++
       if (FKN.pendingTick) return
       FKN.pendingTick = true
-      setTimeout(() => {
-        FKN.pendingTick = false
-        if (!Module._lt_session_tick) return
-        FKN.stats.tick++
-        const ran = Module._lt_session_tick()
-        if (ran > 0) FKN.scheduleTick()
-      }, 16)
+      if (FKN.tickIdle) {
+        // Idle path: 16ms cadence keeps timers/CPU low when nothing is
+        // flowing. The first tick after a quiet period is here.
+        setTimeout(FKN._doTick, 16)
+      } else {
+        // Active path: MessageChannel post — fires as the next task.
+        FKN._mc.port2.postMessage(null)
+      }
+    },
+    tickIdle: true,
+    _doTick() {
+      FKN.pendingTick = false
+      if (!Module._lt_session_tick) return
+      FKN.stats.tick++
+      const ran = Module._lt_session_tick()
+      // ran>0 means more work pending; stay on the fast path. ran===0
+      // means quiet — switch to setTimeout next time.
+      FKN.tickIdle = (ran === 0)
+      if (ran > 0) FKN.scheduleTick()
+    },
+    _mcInit() {
+      if (FKN._mc) return
+      FKN._mc = new MessageChannel()
+      FKN._mc.port1.onmessage = FKN._doTick
     },
 
     // Lightweight counters. The host can inspect FKN.stats for diagnostics
@@ -128,6 +153,7 @@ addToLibrary({
       FKN.initialized = true
       // Expose for diagnostic inspection from the host.
       if (typeof Module === 'object') Module.__FKN = FKN
+      FKN._mcInit()
     },
 
     // sockaddr_in / sockaddr_in6 readers/writers. Asio passes these as raw
@@ -548,6 +574,13 @@ addToLibrary({
           (st.kind === 'udp' && true)
         )) revents |= 4
         if (st.error) revents |= 8
+        // Track which TCP fds Asio is even asking about — they need to be
+        // polled for libtorrent's write side to kick in.
+        if (st.kind === 'tcp' && st.connected) {
+          FKN.stats._tcpPolled = (FKN.stats._tcpPolled || 0) + 1
+          if (events & 4) FKN.stats._tcpPolledOut = (FKN.stats._tcpPolledOut || 0) + 1
+          if (events & 1) FKN.stats._tcpPolledIn = (FKN.stats._tcpPolledIn || 0) + 1
+        }
       }
       HEAP16[(off + 6) >> 1] = revents
       if (revents) ready++
@@ -614,23 +647,30 @@ addToLibrary({
       const ptr = _malloc(len)
       HEAPU8.fill(0, ptr, ptr + len)
       Module._lt_disk_complete_read(jobLo, jobHi, ptr, len, 0)
-      FKN.scheduleTick()
       return
     }
-    Promise.resolve(FKN.storage.read(id, fileIdx, offset, len))
-      .then((bytes) => {
-        // Allocate a buffer in WASM heap; the disk_buffer_holder owns it
-        // and lt_disk_complete_read schedules its free().
-        const ptr = _malloc(bytes.length)
-        HEAPU8.set(bytes, ptr)
-        Module._lt_disk_complete_read(jobLo, jobHi, ptr, bytes.length, 0)
-        FKN.scheduleTick()
-      })
-      .catch((e) => {
-        console.error('[fkn] disk read error', e)
-        Module._lt_disk_complete_read(jobLo, jobHi, 0, 0, e.errno || 5)
-        FKN.scheduleTick()
-      })
+    const onBytes = (bytes) => {
+      // Allocate a buffer in WASM heap; the disk_buffer_holder owns it
+      // and lt_disk_complete_read schedules its free().
+      const ptr = _malloc(bytes.length)
+      HEAPU8.set(bytes, ptr)
+      Module._lt_disk_complete_read(jobLo, jobHi, ptr, bytes.length, 0)
+    }
+    const onErr = (e) => {
+      console.error('[fkn] disk read error', e)
+      Module._lt_disk_complete_read(jobLo, jobHi, 0, 0, e.errno || 5)
+      FKN.scheduleTick()
+    }
+    let result
+    try { result = FKN.storage.read(id, fileIdx, offset, len) }
+    catch (e) { onErr(e); return }
+    // Fast path: synchronous return (e.g. OPFS hot path with cached handle).
+    // No microtask hop, no scheduleTick (we're already inside a tick).
+    if (result && typeof result.then === 'function') {
+      result.then(onBytes, onErr).then(() => FKN.scheduleTick())
+    } else {
+      onBytes(result)
+    }
   },
 
   js_disk_write__deps: ['$FKN'],
@@ -640,20 +680,28 @@ addToLibrary({
     if (!FKN.storage) {
       // Disabled-disk: silently accept and discard. No buffer copy needed.
       Module._lt_disk_complete_write(jobLo, jobHi, 0)
-      FKN.scheduleTick()
       return
     }
     // Slice off a copy that lives independent of WASM heap reuse.
     const bytes = HEAPU8.slice(dataPtr, dataPtr + len)
-    Promise.resolve(FKN.storage.write(id, fileIdx, offset, bytes))
-      .then(() => {
-        Module._lt_disk_complete_write(jobLo, jobHi, 0)
-        FKN.scheduleTick()
-      })
-      .catch((e) => {
-        Module._lt_disk_complete_write(jobLo, jobHi, e.errno || 5)
-        FKN.scheduleTick()
-      })
+    const onErr = (e) => {
+      Module._lt_disk_complete_write(jobLo, jobHi, e?.errno || 5)
+      FKN.scheduleTick()
+    }
+    let result
+    try { result = FKN.storage.write(id, fileIdx, offset, bytes) }
+    catch (e) { onErr(e); return }
+    // Fast path: sync completion. Avoids microtask hop + redundant
+    // scheduleTick. We're already inside a tick handler, and the C++
+    // disk_io will pick up the completion in the same poll_one loop.
+    if (result && typeof result.then === 'function') {
+      result.then(
+        () => { Module._lt_disk_complete_write(jobLo, jobHi, 0); FKN.scheduleTick() },
+        onErr,
+      )
+    } else {
+      Module._lt_disk_complete_write(jobLo, jobHi, 0)
+    }
   },
 
   js_disk_release__deps: ['$FKN'],
@@ -752,6 +800,72 @@ addToLibrary({
     return st.kind === 'udp'
       ? FKN_recvfrom(fd, buf, len, flags, addr, addrLen)
       : FKN_recv(fd, buf, len, flags)
+  },
+
+  // sendmsg: scatter-gather send. Boost.Asio uses this on Emscripten for
+  // every TCP write (one msghdr with one iovec covering the buffer; UDP
+  // gets msg_name set). Without an override Emscripten's default fails
+  // with ENOSYS and our peer-side TCP writes silently drop, which is
+  // why the 180 connected TCP fds we saw had `recv=0/send=0`.
+  //
+  // musl msghdr layout (32-bit):
+  //   void*   msg_name        @ 0
+  //   socklen msg_namelen     @ 4
+  //   iovec*  msg_iov         @ 8
+  //   size_t  msg_iovlen      @ 12
+  //   void*   msg_control     @ 16
+  //   size_t  msg_controllen  @ 20
+  //   int     msg_flags       @ 24
+  //
+  // iovec layout:
+  //   void*   iov_base @ 0
+  //   size_t  iov_len  @ 4
+  __syscall_sendmsg__deps: ['$FKN', '$FKN_send', '$FKN_sendto'],
+  __syscall_sendmsg: function(fd, msgPtr, _flags) {
+    const st = FKN.fds.get(fd)
+    if (!st) {
+      if (FKN.stats._unknownSendmsg === undefined) FKN.stats._unknownSendmsg = 0
+      FKN.stats._unknownSendmsg++
+      return -9
+    }
+    if (st.kind === 'tcp') FKN.stats._tcpSendmsgCalls = (FKN.stats._tcpSendmsgCalls || 0) + 1
+    const namePtr   = HEAPU32[(msgPtr +  0) >> 2]
+    const nameLen   = HEAPU32[(msgPtr +  4) >> 2]
+    const iovPtr    = HEAPU32[(msgPtr +  8) >> 2]
+    const iovLen    = HEAPU32[(msgPtr + 12) >> 2]
+    // Concatenate iovecs into one contiguous WASM-heap region by walking
+    // them. Asio in practice only uses 1-2 iovecs per send, so we
+    // optimise for the common one-iovec case.
+    let total = 0
+    if (iovLen === 1) {
+      const iovBase = HEAPU32[(iovPtr + 0) >> 2]
+      const iovL    = HEAPU32[(iovPtr + 4) >> 2]
+      if (st.kind === 'udp') {
+        return FKN_sendto(fd, iovBase, iovL, 0, namePtr || 0, nameLen || 0)
+      }
+      return FKN_send(fd, iovBase, iovL, 0)
+    }
+    // Multi-iovec: stitch a temporary buffer so the underlying send
+    // sees one chunk. Allocation is per-call but msglens are small.
+    for (let i = 0; i < iovLen; i++) {
+      total += HEAPU32[(iovPtr + i * 8 + 4) >> 2]
+    }
+    const combinedPtr = _malloc(total)
+    let off = 0
+    for (let i = 0; i < iovLen; i++) {
+      const iovBase = HEAPU32[(iovPtr + i * 8 + 0) >> 2]
+      const iovL    = HEAPU32[(iovPtr + i * 8 + 4) >> 2]
+      HEAPU8.copyWithin(combinedPtr + off, iovBase, iovBase + iovL)
+      off += iovL
+    }
+    let rc
+    if (st.kind === 'udp') {
+      rc = FKN_sendto(fd, combinedPtr, total, 0, namePtr || 0, nameLen || 0)
+    } else {
+      rc = FKN_send(fd, combinedPtr, total, 0)
+    }
+    _free(combinedPtr)
+    return rc
   },
 
   __syscall_sendto__deps: ['$FKN', '$FKN_send', '$FKN_sendto'],

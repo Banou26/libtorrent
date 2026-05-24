@@ -10,12 +10,29 @@
 //   completion). The C++ side runs io_context.poll(), processes whatever is
 //   ready, and returns. No Asyncify.
 
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <memory>
 #include <string>
 #include <vector>
 #include <unordered_map>
+
+#ifdef __EMSCRIPTEN__
+// Emscripten ships __syscall_setsockopt as a `weak` C stub in
+// emscripten_syscall_stubs.c that always returns -ENOPROTOOPT and prints
+// "warning: unsupported syscall: __syscall_setsockopt" once per call.
+// Boost.Asio reads that as "this socket can't be configured" and refuses
+// to write the BT handshake — that's why our 19 connected TCP fds had
+// recv=0/send=0 across the board. Override with a strong symbol that
+// silently accepts everything. We don't have a real kernel here; the
+// rate-limit / NODELAY / KEEPALIVE knobs are no-ops over the WebVPN
+// tunnel anyway.
+extern "C" int __syscall_setsockopt(int /*fd*/, int /*level*/, int /*optname*/,
+                                    int /*optval*/, int /*optlen*/, int /*dummy*/) {
+  return 0;
+}
+#endif
 
 #include "libtorrent/session.hpp"
 #include "libtorrent/session_params.hpp"
@@ -113,6 +130,26 @@ LT_API int lt_session_create() {
   sp.set_bool(lt::settings_pack::enable_upnp, false);
   sp.set_bool(lt::settings_pack::enable_natpmp, false);
   sp.set_bool(lt::settings_pack::enable_lsd, false);
+  // Throughput tuning. Browser environment: we have no kernel TCP buffers
+  // to feed into and our recv loop is paced by JS task scheduling rather
+  // than a real OS reactor, so the defaults (which assume a Linux box
+  // with native sockets) under-utilise what we can actually do.
+  //   - send/recv buffer watermarks: bump to keep more bytes in flight
+  //     between request and reply, especially helpful over the WebVPN
+  //     where the round-trip is iframe-relayed.
+  //   - max_out_request_queue: cap the per-peer outstanding request
+  //     count so a single laggy peer doesn't queue up MBs of work that
+  //     we won't process this second.
+  sp.set_int(lt::settings_pack::send_buffer_watermark, 5 * 1024 * 1024);
+  sp.set_int(lt::settings_pack::send_buffer_low_watermark, 512 * 1024);
+  sp.set_int(lt::settings_pack::send_buffer_watermark_factor, 150);
+  sp.set_int(lt::settings_pack::max_out_request_queue, 1500);
+  sp.set_int(lt::settings_pack::connections_limit, 500);
+  // Speed up peer selection — defaults bias for long-running clients.
+  sp.set_int(lt::settings_pack::unchoke_slots_limit, 32);
+  // The hot path is data movement, not bookkeeping. Disable the rate
+  // smoothing that introduces small artificial waits.
+  sp.set_int(lt::settings_pack::mixed_mode_algorithm, lt::settings_pack::prefer_tcp);
   // DHT bootstraps via DNS to router.bittorrent.com / utorrent.com which
   // would spawn a resolver worker thread — fails hard under -sUSE_PTHREADS=0.
   // Disable for now; can be re-enabled once the JS-side DNS path is wired.
@@ -292,25 +329,24 @@ LT_API int lt_diag_parse_interfaces(char const* str) {
 // between batches; the JS side rearms scheduleTick when this returns the
 // budget cap (meaning more work likely waiting).
 //
-// Set to 1 because individual handlers inside libtorrent can themselves
-// drive nested work via boost::asio::dispatch — that runs synchronously on
-// the io_context's current thread without going back through the queue, so
-// a "single" poll_one can actually chain dozens of frames. Strictest cap
-// keeps the renderer responsive at the cost of throughput. Higher values
-// (tried 4 and 16) cause the renderer to freeze when bursts hit. The real
-// fix is a Worker thread for libtorrent — see task #22.
-static constexpr int kHandlersPerTick = 1;
-
-// Returns the number of handlers run this tick. JS reads this and, if it
-// equals kHandlersPerTick, re-arms scheduleTick to drain the rest.
+// Drain handlers in a time-budgeted loop: keep calling poll() (which
+// processes all currently-ready handlers in one shot) as long as more
+// work appears, capped at ~8ms to leave the renderer breathing room.
+// Without the loop, work that becomes ready DURING the tick (e.g. a
+// handler that posts another handler) has to wait a full JS task round-
+// trip to be picked up. Browser task rate is ~150-200/sec under load
+// so each spared round-trip is worth it.
 LT_API int lt_session_tick() {
   if (!g_session) return 0;
   std::size_t ran = 0;
   try {
-    for (int i = 0; i < kHandlersPerTick; ++i) {
-      std::size_t const n = g_session->ioc->poll_one();
-      if (n == 0) break;
+    auto const start = std::chrono::steady_clock::now();
+    auto const deadline = start + std::chrono::milliseconds(8);
+    while (true) {
+      std::size_t const n = g_session->ioc->poll();
       ran += n;
+      if (n == 0) break;
+      if (std::chrono::steady_clock::now() > deadline) break;
     }
     g_total_handlers += static_cast<std::int64_t>(ran);
     ++g_tick_count;
