@@ -49,8 +49,10 @@ worker.addEventListener('message', (ev: MessageEvent) => {
     for (const a of msg.alerts || []) {
       // 79/80 are alert::session_log and alert::torrent_log — they fire
       // every tick once a torrent is active and bury the interesting
-      // stuff.
+      // stuff. 57 is stats. Filter from DOM but pipe to console so
+      // probes can grep the wire.
       if (a.t === 79 || a.t === 80 || a.t === 57) continue
+      console.log('ALERT', a.t, a.m)
       const el = $('alerts')
       el.textContent = (`[${a.t}] ${a.m}\n` + el.textContent).slice(0, 8000)
     }
