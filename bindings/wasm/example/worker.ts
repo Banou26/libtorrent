@@ -13,7 +13,7 @@
 // Node-stdlib shims expected by @fkn/lib transitive deps (buffer, stream).
 // In the Worker scope `self` is the global; mirror the live.html setup.
 ;(self as any).global = self
-;(self as any).process = { env: { NODE_DEBUG: '' }, version: '', nextTick: (fn: any) => queueMicrotask(fn) }
+;(self as any).process = { env: { NODE_DEBUG: '' }, version: '', nextTick: (fn: any, ...args: any[]) => queueMicrotask(() => fn(...args)) }
 
 import * as net from '@webvpn/net'
 import * as dgram from '@webvpn/dgram'

@@ -35,7 +35,7 @@
     <script>
       // Node-stdlib shims for the main thread's @fkn/lib (iframe host).
       window.global = window;
-      window.process = { env: { NODE_DEBUG: '' }, version: '', nextTick: (fn) => queueMicrotask(fn) };
+      window.process = { env: { NODE_DEBUG: '' }, version: '', nextTick: (fn, ...args) => queueMicrotask(() => fn(...args)) };
     </script>
     <script type="module" src="./worker-main.ts"></script>
   </body>
