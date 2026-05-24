@@ -25,17 +25,24 @@
     </div>
 
     <div class="stat">
-      <strong>State:</strong> <span id="state">—</span><br />
-      <strong>Progress:</strong> <span id="progress">0%</span><br />
-      <strong>Down:</strong> <span id="down">0 KB/s</span>
-      <strong>Up:</strong> <span id="up">0 KB/s</span><br />
-      <strong>Peers:</strong> <span id="peers">0</span> /
-      <strong>Seeds:</strong> <span id="seeds">0</span>
+      <strong>FDs:</strong> <span id="state">—</span><br />
+      <strong>Ticks:</strong> <span id="progress">0</span><br />
+      <strong>UDP in:</strong> <span id="down">0 B/s</span>
+      <strong>UDP out:</strong> <span id="up">0 B/s</span><br />
+      <strong>UDP pkts:</strong> <span id="peers">0</span> /
+      <strong>Total in:</strong> <span id="seeds">0 KiB</span>
     </div>
 
     <h2>Alerts</h2>
     <pre id="alerts"></pre>
 
+    <script>
+      // Node-stdlib shims expected by @fkn/lib transitive deps (buffer,
+      // stream, events). Match live.html: forward nextTick args, otherwise
+      // readable-stream's resume_(stream, state) runs with state=undefined.
+      window.global = window
+      window.process = { env: { NODE_DEBUG: '' }, version: '', nextTick: (fn, ...args) => queueMicrotask(() => fn(...args)) }
+    </script>
     <script type="module" src="./main.ts"></script>
   </body>
 </html>

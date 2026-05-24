@@ -10,15 +10,16 @@
 //     osra messages between iframe and worker — so the worker's @fkn/lib
 //     can call net/dgram transparently.
 
-// Node-stdlib shims expected by @fkn/lib transitive deps (buffer, stream).
-// In the Worker scope `self` is the global; mirror the live.html setup.
-;(self as any).global = self
-;(self as any).process = { env: { NODE_DEBUG: '' }, version: '', nextTick: (fn: any, ...args: any[]) => queueMicrotask(() => fn(...args)) }
+// Node-stdlib shims (global, process). Imported separately so it runs
+// BEFORE the hoisted @webvpn/{net,dgram} imports — those transitively
+// pull readable-stream which dereferences `process` at module-eval time.
+import './node-shims'
 
 import * as net from '@webvpn/net'
 import * as dgram from '@webvpn/dgram'
 
 import factory from './libtorrent.js'
+import { OPFSStorage } from '../js/opfs'
 
 let inst: any
 const rxLog: any[] = []
@@ -52,15 +53,29 @@ const drainAlerts = () => {
   return out
 }
 
-const status = () => ({
-  fds: inst.__FKN ? inst.__FKN.fds.size : 0,
-  ticks: Number(inst._lt_diag_tick_count()),
-  handlers: Number(inst._lt_diag_total_handlers()),
-  rxCount: rxLog.length,
-})
+const status = () => {
+  const fkn = inst.__FKN
+  if (!fkn) return { ready: false }
+  const fdsByKind: Record<string, number> = {}
+  for (const st of fkn.fds.values()) fdsByKind[st.kind] = (fdsByKind[st.kind] || 0) + 1
+  return {
+    ready: true,
+    fds: fkn.fds.size,
+    fdsByKind,
+    ticks: Number(inst._lt_diag_tick_count()),
+    handlers: Number(inst._lt_diag_total_handlers()),
+    udp: { rx: fkn.stats.udpRx, tx: fkn.stats.udpTx },
+    tcp: { rx: fkn.stats.tcpRx, tx: fkn.stats.tcpTx },
+    udpPkts: rxLog.length,
+  }
+}
 
 const init = async () => {
-  const fkn = { net, dgram, storage: null }
+  // OPFS is available in workers; using it as our disk backend means
+  // libtorrent actually persists pieces (vs the live.html null-storage path
+  // that discards everything just to keep the protocol happy).
+  const storage = new OPFSStorage()
+  const fkn = { net, dgram, storage }
   inst = await (factory as any)({ fkn })
   inst._lt_session_create()
   // First handful of ticks: bring up listen sockets so FKN init runs.
@@ -71,8 +86,15 @@ const init = async () => {
   ;(self as any).postMessage({ type: 'ready' })
 }
 
-self.onmessage = (e: MessageEvent) => {
+// addEventListener (not self.onmessage = …) so we coexist with @fkn/lib's
+// relayWorker listener — assigning the property would clobber whichever
+// listener was set last.
+self.addEventListener('message', (e: MessageEvent) => {
   const m = e.data
+  // Skip osra-shaped messages (those go to @fkn/lib's listener — they
+  // have a specific envelope shape and we'd misinterpret them).
+  if (!m || typeof m !== 'object' || !m.type || typeof m.type !== 'string') return
+  if (m.type !== 'add-magnet' && m.type !== 'poll') return
   if (!inst) {
     ;(self as any).postMessage({ type: 'error', message: 'worker not initialized' })
     return
@@ -88,7 +110,7 @@ self.onmessage = (e: MessageEvent) => {
   } else if (m.type === 'poll') {
     ;(self as any).postMessage({ type: 'poll-result', status: status(), alerts: drainAlerts(), rx: rxLog.slice(-10) })
   }
-}
+})
 
 init().catch((e: any) => {
   ;(self as any).postMessage({ type: 'error', message: String(e?.stack ?? e) })
