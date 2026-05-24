@@ -351,7 +351,14 @@ LT_API int lt_session_tick() {
   std::size_t ran = 0;
   try {
     auto const start = std::chrono::steady_clock::now();
-    auto const deadline = start + std::chrono::milliseconds(8);
+    // Worker variant: libtorrent runs in a dedicated Worker, so the
+    // renderer never sees this tick. The only thing it shares time with
+    // is the @fkn/lib dgram socket's 'message' handler. A 100 ms cap is
+    // generous enough to let libtorrent burn down a full burst of
+    // pending blocks without ping-pong; smaller budgets bounce control
+    // back to JS between tiny batches, capping throughput well below
+    // what the network is feeding us.
+    auto const deadline = start + std::chrono::milliseconds(100);
     while (true) {
       std::size_t const n = g_session->ioc->poll();
       ran += n;
