@@ -18,11 +18,16 @@ setTimeout(() => {
 
 const $ = (id: string) => document.getElementById(id)!
 
-let lastUdpRx = 0, lastUdpTx = 0, lastTs = Date.now()
+let lastNetRx = 0, lastNetTx = 0, lastTs = Date.now()
 const fmtRate = (bytes: number) => {
   if (bytes < 1024) return bytes + ' B/s'
   if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KiB/s'
   return (bytes / (1024 * 1024)).toFixed(2) + ' MiB/s'
+}
+const fmtBytes = (bytes: number) => {
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(0) + ' KiB'
+  if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + ' MiB'
+  return (bytes / (1024 * 1024 * 1024)).toFixed(2) + ' GiB'
 }
 
 // addEventListener — safer than `worker.onmessage =` when @fkn/lib's
@@ -41,15 +46,18 @@ worker.addEventListener('message', (ev: MessageEvent) => {
     ;(window as any).__lastStatus = s
     const now = Date.now()
     const dt = (now - lastTs) / 1000
-    const rxRate = dt > 0 ? (s.udp.rx - lastUdpRx) / dt : 0
-    const txRate = dt > 0 ? (s.udp.tx - lastUdpTx) / dt : 0
-    lastUdpRx = s.udp.rx; lastUdpTx = s.udp.tx; lastTs = now
+    const totalRx = (s.tcp?.rx ?? 0) + (s.udp?.rx ?? 0)
+    const totalTx = (s.tcp?.tx ?? 0) + (s.udp?.tx ?? 0)
+    const rxRate = dt > 0 ? (totalRx - lastNetRx) / dt : 0
+    const txRate = dt > 0 ? (totalTx - lastNetTx) / dt : 0
+    lastNetRx = totalRx; lastNetTx = totalTx; lastTs = now
     $('state').textContent = `${s.fds} fds  ${s.fdsByKind?.tcp ?? 0} tcp / ${s.fdsByKind?.udp ?? 0} udp / ${s.fdsByKind?.['tcp-listen'] ?? 0} listen`
     $('progress').textContent = `${s.ticks} ticks, ${s.handlers} handlers`
     $('down').textContent = fmtRate(rxRate)
     $('up').textContent = fmtRate(txRate)
-    $('peers').textContent = String(s.udpPkts)
-    $('seeds').textContent = `${(s.udp.rx / 1024).toFixed(0)} KiB`
+    $('tcp-in').textContent = fmtBytes(s.tcp?.rx ?? 0)
+    $('udp-in').textContent = fmtBytes(s.udp?.rx ?? 0)
+    $('seeds').textContent = fmtBytes(totalRx)
     for (const a of msg.alerts || []) {
       // 79/80 are alert::session_log and alert::torrent_log — they fire
       // every tick once a torrent is active and bury the interesting
