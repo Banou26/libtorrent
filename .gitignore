@@ -89,3 +89,10 @@ examples/upnp_test
 # binaries in the tests directory
 tools/dht_put
 tools/session_log_alerts
+
+# Emscripten compile cache (emcc -O3 caches sysroot objects here)
+.em_cache/
+bindings/wasm/.em_cache/
+
+# Playwright MCP dumps
+.playwright-mcp/
