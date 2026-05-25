@@ -1017,7 +1017,11 @@ void utp_socket_impl::send_syn()
 	// ID that it expects to receive the syn ack on. All
 	// subsequent connection IDs will be this plus one.
 	h->connection_id = m_recv_id;
-	h->timestamp_difference_microseconds = m_reply_micro;
+	// WASM hack: send 1us (not 0us — 0 is the uTP NULL sentinel that
+	// triggers seeder safe-mode) so peer's LEDBAT histogram base settles
+	// at ~1us, current samples also ~1us, computed delta ≈ 0 → no LEDBAT
+	// backoff. m_reply_micro stays real for our own CC histogram above.
+	h->timestamp_difference_microseconds = 1;
 	h->wnd_size = 0;
 	h->seq_nr = m_seq_nr;
 	h->ack_nr = 0;
@@ -1147,7 +1151,7 @@ void utp_socket_impl::send_reset(std::uint16_t const ack_nr)
 	h.type_ver = (ST_RESET << 4) | 1;
 	h.extension = utp_no_extension;
 	h.connection_id = m_send_id;
-	h.timestamp_difference_microseconds = m_reply_micro;
+	h.timestamp_difference_microseconds = 1;  // WASM hack — see other sites
 	h.wnd_size = 0;
 	h.seq_nr = std::uint16_t(random(0xffff));
 	h.ack_nr = ack_nr;
@@ -1771,7 +1775,11 @@ bool utp_socket_impl::send_pkt(int const flags)
 		p->mtu_probe = false;
 	}
 
-	h->timestamp_difference_microseconds = m_reply_micro;
+	// WASM hack: send 1us (not 0us — 0 is the uTP NULL sentinel that
+	// triggers seeder safe-mode) so peer's LEDBAT histogram base settles
+	// at ~1us, current samples also ~1us, computed delta ≈ 0 → no LEDBAT
+	// backoff. m_reply_micro stays real for our own CC histogram above.
+	h->timestamp_difference_microseconds = 1;
 	h->wnd_size = static_cast<std::uint32_t>(std::max(
 		m_receive_buffer_capacity - m_buffered_incoming_bytes
 		- m_receive_buffer_size, 0));
@@ -2010,7 +2018,11 @@ bool utp_socket_impl::resend_packet(packet* p, bool fast_resend)
 	p->need_resend = false;
 	auto* h = reinterpret_cast<utp_header*>(p->buf);
 	// update packet header
-	h->timestamp_difference_microseconds = m_reply_micro;
+	// WASM hack: send 1us (not 0us — 0 is the uTP NULL sentinel that
+	// triggers seeder safe-mode) so peer's LEDBAT histogram base settles
+	// at ~1us, current samples also ~1us, computed delta ≈ 0 → no LEDBAT
+	// backoff. m_reply_micro stays real for our own CC histogram above.
+	h->timestamp_difference_microseconds = 1;
 	p->send_time = clock_type::now();
 	h->timestamp_microseconds = std::uint32_t(
 		total_microseconds(p->send_time.time_since_epoch()) & 0xffffffff);
