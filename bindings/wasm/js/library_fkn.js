@@ -275,7 +275,23 @@ addToLibrary({
           FKN._dbgWorkerUdpBytes = 0
         }, 1000)
       }
+      // Init JS-busy counter
+      if (!FKN._dbgJsBusyStarted) {
+        FKN._dbgJsBusyStarted = true
+        FKN._dbgJsBusyUs = 0
+        FKN._dbgJsHandlerCalls = 0
+        setInterval(() => {
+          if (FKN._dbgJsBusyUs) {
+            console.log('[fkn-js] handler_calls/s=' + FKN._dbgJsHandlerCalls
+              + ' busy_ms=' + Math.round(FKN._dbgJsBusyUs / 1000)
+              + ' avg_us/call=' + Math.round(FKN._dbgJsBusyUs / (FKN._dbgJsHandlerCalls || 1)))
+          }
+          FKN._dbgJsBusyUs = 0
+          FKN._dbgJsHandlerCalls = 0
+        }, 1000)
+      }
       sock.on('message', (data, rinfo) => {
+        const _t0 = performance.now()
         FKN._dbgWorkerUdpPkts++
         FKN._dbgWorkerUdpBytes += data.length || data.byteLength || 0
         // CRITICAL: copy the buffer. @fkn/lib's WebTransport datagram reader
@@ -292,6 +308,8 @@ addToLibrary({
           address: rinfo.address, port: rinfo.port, family: rinfo.family,
         })
         FKN.scheduleTick()
+        FKN._dbgJsBusyUs += (performance.now() - _t0) * 1000
+        FKN._dbgJsHandlerCalls++
       })
       sock.on('error', (err) => {
         st.error = err.errno || FKN.err.IO
@@ -488,6 +506,14 @@ addToLibrary({
       written += take
     }
     FKN.stats.tcpRx += written
+    // CRITICAL: if there's data still buffered (asio read partial), re-arm
+    // the tick. Otherwise asio is waiting for a poll edge that never comes
+    // (we delivered the on('data') event already; the rest of the chunk
+    // never triggers a new schedule). This was THE bug behind "TCP fd
+    // connects, handshake exchanges, then silence" — libtorrent was
+    // asking for 104 bytes out of 226 available and never woke up to
+    // read the remaining 122.
+    if (r.total > 0) FKN.scheduleTick()
     return written
   },
 
