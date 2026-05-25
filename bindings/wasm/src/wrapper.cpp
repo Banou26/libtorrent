@@ -160,6 +160,10 @@ LT_API int lt_session_create() {
   // The hot path is data movement, not bookkeeping. Disable the rate
   // smoothing that introduces small artificial waits.
   sp.set_int(lt::settings_pack::mixed_mode_algorithm, lt::settings_pack::prefer_tcp);
+  // Re-enable uTP for real-world tests — public swarms have a mix of TCP and
+  // uTP peers, and many seeders are uTP-first. prefer_tcp above already gives
+  // TCP priority when both are available. uTP path caps at ~14 MiB/s due to
+  // LEDBAT delay sensitivity but is still much better than no peer.
   // DHT bootstraps via DNS to router.bittorrent.com / utorrent.com which
   // would spawn a resolver worker thread — fails hard under -sUSE_PTHREADS=0.
   // Disable for now; can be re-enabled once the JS-side DNS path is wired.
@@ -367,6 +371,28 @@ LT_API int lt_session_tick() {
     }
     g_total_handlers += static_cast<std::int64_t>(ran);
     ++g_tick_count;
+    // 1-second-window stats so we can see where wallclock goes:
+    //   tick_us / handlers_processed / ticks_in_window
+    static auto window_start = start;
+    static std::int64_t window_tick_us = 0;
+    static std::int64_t window_ticks = 0;
+    static std::int64_t window_handlers = 0;
+    auto const tick_end = std::chrono::steady_clock::now();
+    window_tick_us += std::chrono::duration_cast<std::chrono::microseconds>(tick_end - start).count();
+    window_ticks++;
+    window_handlers += static_cast<std::int64_t>(ran);
+    auto const since_window = std::chrono::duration_cast<std::chrono::seconds>(tick_end - window_start).count();
+    if (since_window >= 1) {
+      LT_LOG((std::string("[tick] ticks/s=") + std::to_string(window_ticks)
+        + " handlers/s=" + std::to_string(window_handlers)
+        + " busy_ms=" + std::to_string(window_tick_us / 1000)
+        + " avg_us/tick=" + std::to_string(window_ticks ? window_tick_us / window_ticks : 0)
+      ).c_str());
+      window_start = tick_end;
+      window_tick_us = 0;
+      window_ticks = 0;
+      window_handlers = 0;
+    }
   } catch (std::system_error const& e) {
     std::string m = std::string("tick syserr: ") + e.what()
       + " | code=" + std::to_string(e.code().value())
