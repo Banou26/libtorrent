@@ -6159,8 +6159,14 @@ namespace libtorrent {
 			int buffer_size = int(m_socket.available(ec));
 			if (ec)
 			{
-				disconnect(ec, operation_t::available);
-				return;
+				// WASM: our socket shim doesn't implement FIONREAD; available()
+				// fails. Don't disconnect — just skip the sync drain and let
+				// the next setup_receive() pull more bytes via async_read_some.
+				// (Before this guard, a single partial-read on TCP killed the
+				// peer immediately — operation_t::available silently disconnected
+				// and no peer_disconnect_alert ever fired, making the bug invisible.)
+				buffer_size = 0;
+				ec = error_code();
 			}
 
 #ifndef TORRENT_DISABLE_LOGGING
